@@ -2,18 +2,84 @@
 @import "ag-grid-community/styles/ag-grid.css";
 @import "ag-grid-community/styles/ag-theme-quartz.css";
 
+@theme {
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-serif: var(--font-serif), ui-serif, Georgia, "Times New Roman", serif;
+
+  --color-background: #f5f3f0;
+  --color-surface: #ffffff;
+  --color-raised: #ece9e5;
+  --color-ink: #0c0a09;
+  --color-muted: #44403c;
+  --color-subtle: #6b6560;
+  --color-border: #d6d3d1;
+  --color-border-strong: #b8b3ad;
+  --color-accent: #9a3412;
+  --color-accent-text: #ffffff;
+  --color-accent-hover: #7c2d12;
+  --color-accent-subtle: #fef3ec;
+  --color-success: #166534;
+  --color-success-bg: #d1fae5;
+  --color-warning: #92400e;
+  --color-warning-bg: #fef3c7;
+  --color-error: #991b1b;
+  --color-error-bg: #fee2e2;
+  --color-info: #155e75;
+  --color-info-bg: #cffafe;
+
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+}
+
+/* Dark mode: gray, not deep black */
+.dark {
+  --color-background: #2a2a2e;
+  --color-surface: #34343a;
+  --color-raised: #3e3e44;
+  --color-ink: #e8e6e3;
+  --color-muted: #b0aca8;
+  --color-subtle: #8a8682;
+  --color-border: #4a4a50;
+  --color-border-strong: #5a5a60;
+  --color-accent: #d97757;
+  --color-accent-text: #1a1a1e;
+  --color-accent-hover: #e8896b;
+  --color-accent-subtle: #3e322e;
+  --color-success: #4ade80;
+  --color-success-bg: #1e3a2e;
+  --color-warning: #fbbf24;
+  --color-warning-bg: #3e3520;
+  --color-error: #f87171;
+  --color-error-bg: #3e2424;
+  --color-info: #67e8f9;
+  --color-info-bg: #1a3640;
+}
+
 :root {
   color-scheme: light;
-  background: #f8fafc;
+  background: var(--color-background);
+}
+
+.dark {
+  color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 body {
   margin: 0;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-background);
 }
 
 a {
@@ -21,10 +87,112 @@ a {
   text-decoration: none;
 }
 
-.ag-theme-quartz {
-  --ag-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  --ag-border-radius: 14px;
-  --ag-wrapper-border-radius: 14px;
-  --ag-header-background-color: #f8fafc;
-  --ag-foreground-color: #0f172a;
+::selection {
+  background: rgba(154, 52, 18, 0.18);
 }
+
+.dark ::selection {
+  background: rgba(217, 119, 87, 0.25);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+.ag-theme-quartz {
+  --ag-font-family: var(--font-sans);
+  --ag-font-size: 13px;
+  --ag-background-color: var(--color-surface);
+  --ag-foreground-color: var(--color-ink);
+  --ag-border-color: var(--color-border);
+  --ag-row-border-color: var(--color-border);
+  --ag-header-background-color: var(--color-background);
+  --ag-header-foreground-color: var(--color-muted);
+  --ag-header-height: 42px;
+  --ag-header-column-padding-left: 14px;
+  --ag-header-column-padding-right: 14px;
+  --ag-row-height: 44px;
+  --ag-row-hover-color: var(--color-raised);
+  --ag-selected-row-background-color: rgba(154, 52, 18, 0.08);
+  --ag-range-selection-border-color: var(--color-accent);
+  --ag-checkbox-checked-color: var(--color-accent);
+  --ag-input-focus-border-color: var(--color-accent);
+  --ag-input-focus-box-shadow: 0 0 0 3px rgba(154, 52, 18, 0.15);
+  --ag-border-radius: var(--radius);
+  --ag-wrapper-border-radius: var(--radius);
+  --ag-cell-horizontal-padding: 14px;
+  --ag-header-cell-hover-background-color: var(--color-raised);
+}
+
+.ag-theme-quartz .ag-header {
+  border-bottom: 2px solid var(--color-border-strong);
+}
+
+.ag-theme-quartz .ag-header-cell,
+.ag-theme-quartz .ag-header-group-cell {
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.015em;
+  text-transform: uppercase;
+}
+
+.ag-theme-quartz .ag-header-cell::after,
+.ag-theme-quartz .ag-header-group-cell::after {
+  display: none;
+}
+
+.ag-theme-quartz .ag-cell {
+  line-height: 22px;
+}
+
+.ag-theme-quartz .ag-row {
+  transition: background-color 120ms ease;
+}
+
+.ag-theme-quartz .ag-status-bar {
+  border-top: 1px solid var(--color-border);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--color-accent);
+}
+
+/* Mobile drawer + backdrop animations */
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 220ms ease-out;
+}
+
+.animate-fade-in {
+  animation: fade-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-slide-in-right,
+  .animate-fade-in {
+    animation-duration: 1ms;
+  }
+}
+

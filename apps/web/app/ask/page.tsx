@@ -5,12 +5,16 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
+import { HelpCircle, Send } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Select } from "@/components/ui/select";
+import { EmptyState } from "@/components/empty-state";
+import { PageHeader } from "@/components/page-header";
 import { api, type AskOut } from "@/lib/api";
 import { parseNumberList } from "@/lib/utils";
 
@@ -45,38 +49,39 @@ export default function AskPage() {
   });
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">One-off Q&A</h1>
-        <p className="mt-1 text-slate-600">
-          Stateless retrieval question answering. The backend stores no chat history.
-        </p>
-      </div>
+    <div className="space-y-8">
+      <PageHeader
+        title="Ask"
+        subtitle="Stateless retrieval Q&A. The backend stores no chat history."
+      />
 
       <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
         <Card>
           <CardHeader>
-            <CardTitle>Ask</CardTitle>
+            <CardTitle>Compose question</CardTitle>
             <CardDescription>Choose papers directly or ask over a table.</CardDescription>
           </CardHeader>
           <CardContent>
             <form className="space-y-3" onSubmit={form.handleSubmit((values) => ask.mutate(values))}>
-              <Textarea placeholder="What is the primary technical contribution?" {...form.register("question")} />
+              <Textarea
+                placeholder="What is the primary technical contribution?"
+                {...form.register("question")}
+              />
               <Input placeholder="Paper IDs, comma separated" {...form.register("paper_ids")} />
-              <select className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" {...form.register("table_id")}>
+              <Select {...form.register("table_id")}>
                 <option value="">Or choose a table</option>
                 {(tables.data ?? []).map((table) => (
                   <option key={table.id} value={table.id}>
                     {table.name}
                   </option>
                 ))}
-              </select>
+              </Select>
               <Input type="number" placeholder="Top K per paper" {...form.register("top_k")} />
               <Button disabled={ask.isPending} type="submit" className="w-full">
-                Ask question
+                <Send className="size-4" /> Ask question
               </Button>
             </form>
-            <div className="mt-5 text-xs text-slate-500">
+            <div className="mt-5 text-xs text-subtle">
               Available paper IDs: {(papers.data ?? []).map((paper) => paper.id).join(", ") || "none"}
             </div>
           </CardContent>
@@ -89,44 +94,71 @@ export default function AskPage() {
 }
 
 function AnswerCard({ answer, loading }: { answer: AskOut | undefined; loading: boolean }) {
+  if (loading) {
+    return (
+      <Card className="flex min-h-[300px] items-center justify-center">
+        <CardContent>
+          <div className="flex flex-col items-center gap-3 text-muted">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-accent" />
+            <p className="text-sm">Retrieving and answering...</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!answer) {
+    return (
+      <Card className="flex min-h-[300px] items-center">
+        <CardContent className="w-full">
+          <EmptyState
+            icon={HelpCircle}
+            title="No answer yet"
+            description="Ask a question to see evidence-backed results."
+          />
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Answer</CardTitle>
-        <CardDescription>Evidence is returned by BAML from retrieved context.</CardDescription>
+        <CardDescription>Evidence from BAML over retrieved context.</CardDescription>
       </CardHeader>
       <CardContent>
-        {loading ? <p className="text-sm text-slate-500">Retrieving and answering…</p> : null}
-        {!loading && !answer ? <p className="text-sm text-slate-500">Ask a question to see results.</p> : null}
-        {answer ? (
-          <div className="space-y-5">
-            <div className="rounded-2xl bg-slate-50 p-5 text-slate-800">{answer.answer}</div>
-            <div className="flex flex-wrap gap-2">
-              {answer.confidence ? <Badge tone="green">confidence: {answer.confidence}</Badge> : null}
-              <Badge tone="slate">papers: {answer.paper_ids.join(", ")}</Badge>
-              <Badge tone="slate">chunks: {answer.retrieved_chunk_ids.join(", ")}</Badge>
-            </div>
-            {answer.rationale ? (
-              <p className="text-sm text-slate-600">
-                <span className="font-medium">Rationale:</span> {answer.rationale}
-              </p>
-            ) : null}
-            <div>
-              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Evidence</h3>
-              <div className="space-y-2">
-                {answer.evidence.map((item, index) => (
-                  <div key={index} className="rounded-xl border border-slate-200 p-3 text-sm">
-                    <div className="mb-1 text-xs text-slate-500">
-                      paper {String(item.paper_id ?? "")} · page {String(item.page ?? "")} · chunk {String(item.chunk_id ?? "")}
-                    </div>
-                    {String(item.quote ?? "")}
+        <div className="space-y-5">
+          <div className="rounded-xl bg-raised p-5 text-ink leading-relaxed">{answer.answer}</div>
+          <div className="flex flex-wrap gap-2">
+            {answer.confidence ? <Badge variant="success">confidence: {answer.confidence}</Badge> : null}
+            <Badge variant="default">papers: {answer.paper_ids.join(", ")}</Badge>
+            <Badge variant="default">chunks: {answer.retrieved_chunk_ids.join(", ")}</Badge>
+          </div>
+          {answer.rationale ? (
+            <p className="text-sm text-muted">
+              <span className="font-medium text-ink">Rationale:</span> {answer.rationale}
+            </p>
+          ) : null}
+          <div>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-subtle">
+              Evidence
+            </h3>
+            <div className="space-y-2">
+              {answer.evidence.map((item, index) => (
+                <div key={index} className="rounded-lg border border-border bg-surface p-3 text-sm">
+                  <div className="mb-1 text-xs text-subtle">
+                    paper {String(item.paper_id ?? "")} · page {String(item.page ?? "")} · chunk {String(item.chunk_id ?? "")}
                   </div>
-                ))}
-                {!answer.evidence.length ? <p className="text-sm text-slate-500">No evidence returned.</p> : null}
-              </div>
+                  {String(item.quote ?? "")}
+                </div>
+              ))}
+              {!answer.evidence.length ? (
+                <p className="text-sm text-muted">No evidence returned.</p>
+              ) : null}
             </div>
           </div>
-        ) : null}
+        </div>
       </CardContent>
     </Card>
   );

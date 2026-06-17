@@ -25,6 +25,32 @@ run = "bun install"
 description = "Initialize local catena storage and run Alembic migrations"
 run = "uv run catena init"
 
+[tasks.dev]
+description = "Start API and web dev servers in zmx sessions"
+run = """
+zmx kill catena-api --force >/dev/null 2>&1 || true
+zmx kill catena-web --force >/dev/null 2>&1 || true
+zmx run catena-api -d mise run api:dev
+zmx run catena-web -d mise run web:dev
+printf '\nStarted catena dev servers in zmx:\n'
+printf '  API:  http://127.0.0.1:8765  (zmx tail catena-api)\n'
+printf '  Web:  http://127.0.0.1:3000  (zmx tail catena-web)\n'
+printf '\nStop with: mise run dev:stop\n'
+printf 'Logs with: mise run dev:tail\n'
+"""
+
+[tasks."dev:tail"]
+description = "Tail zmx API and web dev server output"
+run = "zmx tail catena-api catena-web"
+
+[tasks."dev:stop"]
+description = "Stop zmx API and web dev server sessions"
+run = """
+zmx kill catena-api --force >/dev/null 2>&1 || true
+zmx kill catena-web --force >/dev/null 2>&1 || true
+printf 'Stopped catena zmx dev sessions.\n'
+"""
+
 [tasks."api:dev"]
 description = "Run the local FastAPI server"
 run = "uv run catena serve --reload"

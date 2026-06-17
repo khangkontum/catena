@@ -202,6 +202,8 @@ export const api = {
     request<PaperOut[]>(`/papers${query(params)}`),
   uploadPaper: (formData: FormData) =>
     request<PaperOut>("/papers/upload", { method: "POST", body: formData }),
+  uploadPapers: (formData: FormData) =>
+    request<PaperOut[]>("/papers/upload-batch", { method: "POST", body: formData }),
   setMetadata: (
     paperId: number,
     payload: {

@@ -369,18 +369,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         table_id: Annotated[int | None, Form()] = None,
         no_table: Annotated[bool, Form()] = False,
     ) -> PaperWithTagsOut:
-        if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
+        if not _is_pdf_upload(pdf):
             raise HTTPException(status_code=400, detail="Upload must be a PDF file")
-        upload_path = await _store_upload(library.settings.data_dir / "uploads", pdf)
         resolved_table_id = None if no_table else table_id or library.default_table_id()
-        paper = await library.add_pdf(
-            upload_path,
+        paper = await _ingest_upload(
+            library,
+            pdf,
             title=title,
             doi=doi,
             url=url,
             table_id=resolved_table_id,
         )
         return _paper_with_tags(library, paper)
+
+    @app.post("/papers/upload-batch", response_model=list[PaperWithTagsOut])
+    async def upload_papers(
+        pdfs: Annotated[list[UploadFile], File()],
+        table_id: Annotated[int | None, Form()] = None,
+        no_table: Annotated[bool, Form()] = False,
+    ) -> list[PaperWithTagsOut]:
+        files = [pdf for pdf in pdfs if _is_pdf_upload(pdf)]
+        if not files:
+            raise HTTPException(status_code=400, detail="Upload must include at least one PDF file")
+        resolved_table_id = None if no_table else table_id or library.default_table_id()
+        upload_paths = [
+            await _store_upload(library.settings.data_dir / "uploads", pdf) for pdf in files
+        ]
+        papers = await library.add_pdfs(upload_paths, table_id=resolved_table_id)
+        return _papers_with_tags(library, papers)
 
     @app.patch("/papers/{paper_id}/metadata", response_model=PaperWithTagsOut)
     def set_paper_metadata(paper_id: int, payload: PaperMetadataIn) -> PaperWithTagsOut:
@@ -530,6 +546,29 @@ def _get_paper(library: CatenaLibrary, paper_id: int) -> Paper:
         if paper.id == paper_id:
             return paper
     raise ValueError(f"Paper {paper_id} not found")
+
+
+def _is_pdf_upload(upload: UploadFile) -> bool:
+    return bool(upload.filename and upload.filename.lower().endswith(".pdf"))
+
+
+async def _ingest_upload(
+    library: CatenaLibrary,
+    upload: UploadFile,
+    *,
+    title: str | None = None,
+    doi: str | None = None,
+    url: str | None = None,
+    table_id: int | None = None,
+) -> Paper:
+    upload_path = await _store_upload(library.settings.data_dir / "uploads", upload)
+    return await library.add_pdf(
+        upload_path,
+        title=title,
+        doi=doi,
+        url=url,
+        table_id=table_id,
+    )
 
 
 async def _store_upload(directory: Path, upload: UploadFile) -> Path:

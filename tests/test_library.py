@@ -1,4 +1,6 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from sqlmodel import Session, select
@@ -7,6 +9,7 @@ from catena.config import Settings
 from catena.filters import PaperFilter
 from catena.library import CatenaLibrary
 from catena.models import ExtractionCell, Paper, PaperChunk, PaperSimilarity, Status, TablePaper
+from catena.parsing import ParsedChunk, ParsedDocument, ParsedPdfResult
 from catena.vector import LanceIndex
 
 
@@ -19,6 +22,75 @@ def test_init_runs_alembic_and_creates_default_table(tmp_path):
 
     assert revision == ("20260617_0002",)
     assert library.default_table_id() == 1
+
+
+def test_init_is_thread_safe_for_parallel_first_requests(tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+
+    def load_tables() -> int:
+        return len(library.tables())
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        counts = list(executor.map(lambda _: load_tables(), range(16)))
+
+    assert counts == [1] * 16
+
+
+@pytest.mark.asyncio
+async def test_add_pdfs_uses_one_batch_docling_parse(monkeypatch, tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    table_id = library.default_table_id()
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    parse_calls: list[list[Path]] = []
+
+    def fake_parse_pdfs(paths: list[Path]) -> list[ParsedPdfResult]:
+        parse_calls.append(paths)
+        return [
+            ParsedPdfResult(
+                path=path,
+                document=ParsedDocument(
+                    markdown=f"# {path.stem}",
+                    docling_json={"name": path.name},
+                    chunks=[
+                        ParsedChunk(
+                            index=0,
+                            text=f"chunk for {path.name}",
+                            page_start=1,
+                            page_end=1,
+                            heading=None,
+                            metadata={},
+                        )
+                    ],
+                ),
+            )
+            for path in paths
+        ]
+
+    async def fake_index_paper(self: CatenaLibrary, paper_id: int) -> None:
+        with Session(self.engine) as session:
+            paper = session.get(Paper, paper_id)
+            assert paper is not None
+            paper.index_status = Status.INDEXED
+            session.add(paper)
+            session.commit()
+
+    monkeypatch.setattr("catena.library.parse_pdfs", fake_parse_pdfs)
+    monkeypatch.setattr(CatenaLibrary, "index_paper", fake_index_paper)
+
+    papers = await library.add_pdfs([first, second], table_id=table_id)
+
+    with Session(library.engine) as session:
+        chunks = session.exec(select(PaperChunk)).all()
+        memberships = session.exec(select(TablePaper)).all()
+
+    assert len(papers) == 2
+    assert len(parse_calls) == 1
+    assert len(parse_calls[0]) == 2
+    assert len(chunks) == 2
+    assert len(memberships) == 2
 
 
 def test_add_column_queues_cell_for_existing_table_paper(tmp_path):

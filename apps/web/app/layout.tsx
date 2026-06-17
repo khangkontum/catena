@@ -1,10 +1,24 @@
 import type { Metadata } from "next";
+import { Inter, Crimson_Pro } from "next/font/google";
 import * as React from "react";
 
-import { AppNav } from "@/components/app-nav";
+import { AppShell } from "@/components/app-shell";
 import { Providers } from "@/app/providers";
 
 import "./globals.css";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap",
+});
+
+const crimson = Crimson_Pro({
+  subsets: ["latin"],
+  variable: "--font-serif",
+  display: "swap",
+  weight: ["400", "500", "600"],
+});
 
 export const metadata: Metadata = {
   title: "catena",
@@ -13,13 +27,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body>
+    <html lang="en" className={`${inter.variable} ${crimson.variable}`}>
+      <body className="min-h-screen overflow-x-clip bg-background font-sans text-ink antialiased">
         <Providers>
-          <div className="flex min-h-screen bg-slate-50 text-slate-950">
-            <AppNav />
-            <main className="min-w-0 flex-1 p-4 md:p-8">{children}</main>
-          </div>
+          <AppShell>{children}</AppShell>
         </Providers>
       </body>
     </html>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -26,11 +28,19 @@ from catena.models import (
     Tag,
     utcnow,
 )
-from catena.parsing import PARSER_HASH, parse_pdf
+from catena.parsing import PARSER_HASH, ParsedDocument, parse_pdfs
 from catena.qa import OneOffAnswer, QuestionAnswerService
 from catena.similarity import SimilarityService, SimilarPaper
 from catena.util import copy_pdf, safe_title_from_path, sha256_file, sha256_json, write_json
 from catena.vector import LanceIndex
+
+
+@dataclass(frozen=True)
+class _PendingPdfIngestion:
+    paper_id: int
+    source: Path
+    paper_dir: Path
+    stored_pdf: Path
 
 
 class CatenaLibrary:
@@ -39,10 +49,16 @@ class CatenaLibrary:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.from_env()
         self.engine = make_engine(self.settings)
+        self._init_lock = RLock()
+        self._initialized = False
 
     def init(self) -> None:
-        self.settings.ensure_dirs()
-        init_db(self.engine)
+        with self._init_lock:
+            if self._initialized:
+                return
+            self.settings.ensure_dirs()
+            init_db(self.engine)
+            self._initialized = True
 
     def default_table_id(self) -> int:
         self.init()
@@ -141,27 +157,60 @@ class CatenaLibrary:
         url: str | None = None,
         table_id: int | None = None,
     ) -> Paper:
-        """Add a PDF to the global paper library, optionally attaching it to a table.
+        """Add one PDF globally, optionally attaching it to a table."""
+
+        papers = await self.add_pdfs(
+            [path],
+            title=title,
+            doi=doi,
+            url=url,
+            table_id=table_id,
+        )
+        if not papers:
+            raise RuntimeError(f"No paper was added for {path}")
+        paper = papers[0]
+        if paper.parse_status == Status.FAILED:
+            raise RuntimeError(paper.parse_error or f"Failed to add {path}")
+        return paper
+
+    async def add_pdfs(
+        self,
+        paths: list[Path],
+        *,
+        title: str | None = None,
+        doi: str | None = None,
+        url: str | None = None,
+        table_id: int | None = None,
+    ) -> list[Paper]:
+        """Add PDFs globally with one Docling batch conversion for new files.
 
         Parsing, chunking, embedding, and LanceDB indexing happen once per global paper.
-        Adding that paper to more tables later only creates table-specific queued cells.
+        Existing papers are only attached to the requested table. New PDFs in this batch
+        share one preloaded Docling converter and one `convert_all()` pass instead of
+        recreating the Docling pipeline per file.
         """
 
         self.init()
-        source = path.expanduser().resolve()
-        if not source.exists():
-            raise FileNotFoundError(source)
-        if source.suffix.lower() != ".pdf":
-            raise ValueError(f"Expected a PDF file, got {source}")
-        content_hash = sha256_file(source)
+        sources = [_validated_pdf_path(path) for path in paths]
+        if not sources:
+            return []
+        if len(sources) > 1 and any(item is not None for item in (title, doi, url)):
+            raise ValueError("title, doi, and url overrides are only supported for one PDF")
 
+        ordered_ids: list[int] = []
+        pending: list[_PendingPdfIngestion] = []
         with session_scope(self.engine) as session:
-            existing = session.exec(
-                select(Paper).where(Paper.content_hash == content_hash)
-            ).first()
-            if existing is not None:
-                paper_id = existing.id
-            else:
+            for source in sources:
+                content_hash = sha256_file(source)
+                existing = session.exec(
+                    select(Paper).where(Paper.content_hash == content_hash)
+                ).first()
+                if existing is not None:
+                    if existing.id is None:
+                        raise RuntimeError("Existing paper has no id")
+                    ordered_ids.append(existing.id)
+                    continue
+
                 paper = Paper(
                     title=title or safe_title_from_path(source),
                     source_path=str(source),
@@ -174,73 +223,98 @@ class CatenaLibrary:
                 session.add(paper)
                 session.commit()
                 session.refresh(paper)
-                paper_id = paper.id
-            if paper_id is None:
-                raise RuntimeError("Paper has no id")
-
-        if existing is not None:
-            if table_id is not None:
-                self.add_paper_to_table(table_id, paper_id)
-            return existing
-
-        try:
-            paper_dir = self.settings.papers_dir / str(paper_id)
-            stored_pdf = copy_pdf(source, paper_dir)
-            parsed = parse_pdf(stored_pdf)
-            markdown_path = paper_dir / "document.md"
-            json_path = paper_dir / "docling.json"
-            markdown_path.write_text(parsed.markdown, encoding="utf-8")
-            write_json(json_path, parsed.docling_json)
-
-            with session_scope(self.engine) as session:
-                paper = session.get(Paper, paper_id)
-                if paper is None:
-                    raise RuntimeError("Paper disappeared during ingestion")
-                paper.stored_pdf_path = str(stored_pdf)
-                paper.docling_json_path = str(json_path)
-                paper.markdown_path = str(markdown_path)
-                paper.parse_status = Status.PARSED
-                paper.parse_error = None
-                paper.updated_at = utcnow()
-                session.add(paper)
-                session.exec(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
-                chunks = [
-                    PaperChunk(
-                        paper_id=paper.id or 0,
-                        chunk_index=chunk.index,
-                        text=chunk.text,
-                        page_start=chunk.page_start,
-                        page_end=chunk.page_end,
-                        heading=chunk.heading,
-                        metadata_json=chunk.metadata,
-                        parser_hash=PARSER_HASH,
+                if paper.id is None:
+                    raise RuntimeError("Paper has no id")
+                paper_dir = self.settings.papers_dir / str(paper.id)
+                stored_pdf = copy_pdf(source, paper_dir)
+                ordered_ids.append(paper.id)
+                pending.append(
+                    _PendingPdfIngestion(
+                        paper_id=paper.id,
+                        source=source,
+                        paper_dir=paper_dir,
+                        stored_pdf=stored_pdf,
                     )
-                    for chunk in parsed.chunks
-                ]
-                session.add_all(chunks)
-                session.commit()
-                for chunk in chunks:
-                    session.refresh(chunk)
-                session.refresh(paper)
+                )
 
-            await self.index_paper(paper_id)
-            if table_id is not None:
+        if table_id is not None:
+            pending_ids = {item.paper_id for item in pending}
+            existing_ids = [paper_id for paper_id in ordered_ids if paper_id not in pending_ids]
+            for paper_id in existing_ids:
                 self.add_paper_to_table(table_id, paper_id)
-            with session_scope(self.engine) as session:
-                stored = session.get(Paper, paper_id)
-                if stored is None:
-                    raise RuntimeError("Paper disappeared after indexing")
-                return stored
-        except Exception as exc:
-            with session_scope(self.engine) as session:
-                failed = session.get(Paper, paper_id)
-                if failed is not None:
-                    failed.parse_status = Status.FAILED
-                    failed.index_status = Status.FAILED
-                    failed.parse_error = str(exc)
-                    failed.updated_at = utcnow()
-                    session.add(failed)
-            raise
+
+        if pending:
+            parsed_results = parse_pdfs([item.stored_pdf for item in pending])
+            for item, result in zip(pending, parsed_results, strict=True):
+                if result.document is None:
+                    error = result.error or "Docling conversion failed"
+                    self._mark_paper_failed(item.paper_id, error)
+                    continue
+                try:
+                    self._persist_parsed_document(item, result.document)
+                    await self.index_paper(item.paper_id)
+                    if table_id is not None:
+                        self.add_paper_to_table(table_id, item.paper_id)
+                except Exception as exc:
+                    self._mark_paper_failed(item.paper_id, str(exc))
+
+        return self._papers_by_ids(ordered_ids)
+
+    def _persist_parsed_document(
+        self,
+        item: _PendingPdfIngestion,
+        parsed: ParsedDocument,
+    ) -> None:
+        markdown_path = item.paper_dir / "document.md"
+        json_path = item.paper_dir / "docling.json"
+        markdown_path.write_text(parsed.markdown, encoding="utf-8")
+        write_json(json_path, parsed.docling_json)
+
+        with session_scope(self.engine) as session:
+            paper = session.get(Paper, item.paper_id)
+            if paper is None:
+                raise RuntimeError("Paper disappeared during ingestion")
+            paper.stored_pdf_path = str(item.stored_pdf)
+            paper.docling_json_path = str(json_path)
+            paper.markdown_path = str(markdown_path)
+            paper.parse_status = Status.PARSED
+            paper.parse_error = None
+            paper.updated_at = utcnow()
+            session.add(paper)
+            session.exec(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
+            chunks = [
+                PaperChunk(
+                    paper_id=paper.id or 0,
+                    chunk_index=chunk.index,
+                    text=chunk.text,
+                    page_start=chunk.page_start,
+                    page_end=chunk.page_end,
+                    heading=chunk.heading,
+                    metadata_json=chunk.metadata,
+                    parser_hash=PARSER_HASH,
+                )
+                for chunk in parsed.chunks
+            ]
+            session.add_all(chunks)
+            session.commit()
+
+    def _mark_paper_failed(self, paper_id: int, error: str) -> None:
+        with session_scope(self.engine) as session:
+            failed = session.get(Paper, paper_id)
+            if failed is not None:
+                failed.parse_status = Status.FAILED
+                failed.index_status = Status.FAILED
+                failed.parse_error = error
+                failed.updated_at = utcnow()
+                session.add(failed)
+
+    def _papers_by_ids(self, paper_ids: list[int]) -> list[Paper]:
+        if not paper_ids:
+            return []
+        with Session(self.engine, expire_on_commit=False) as session:
+            papers = session.exec(select(Paper).where(Paper.id.in_(paper_ids))).all()  # type: ignore[union-attr]
+            papers_by_id = {paper.id: paper for paper in papers}
+            return [papers_by_id[paper_id] for paper_id in paper_ids if paper_id in papers_by_id]
 
     async def index_paper(self, paper_id: int) -> None:
         self.settings.require_gateway()
@@ -711,6 +785,15 @@ class CatenaLibrary:
         for membership in memberships:
             _add_cell_if_missing(session, column.table_id, membership.paper_id, column_id)
         session.commit()
+
+
+def _validated_pdf_path(path: Path) -> Path:
+    source = path.expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    if source.suffix.lower() != ".pdf":
+        raise ValueError(f"Expected a PDF file, got {source}")
+    return source
 
 
 def _add_cell_if_missing(session: Session, table_id: int, paper_id: int, column_id: int) -> None:
