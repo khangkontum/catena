@@ -17,3 +17,6 @@ mise.local.toml
 dist/
 build/
 *.egg-info/
+
+# Local test PDFs (sample/reference assets stay local)
+assets/
