@@ -22,6 +22,7 @@ _LLM_ENVS = (
     "CATENA_EMBEDDING_BATCH_SIZE",
     "CATENA_TOP_K",
     "CATENA_LLM_TEMPERATURE",
+    "CATENA_CELL_CONCURRENCY",
 )
 
 
@@ -87,6 +88,7 @@ def test_env_overrides_config_file(tmp_path, monkeypatch):
         embedding_batch_size = 1
         top_k = 1
         llm_temperature = 0.25
+        cell_concurrency = 2
         """,
     )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(tmp_path / "explicit.toml"))
@@ -96,6 +98,7 @@ def test_env_overrides_config_file(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_MODEL", "env-model")
     monkeypatch.setenv("LLM_EMBEDDING", "env-embed")
     monkeypatch.setenv("CATENA_TOP_K", "42")
+    monkeypatch.setenv("CATENA_CELL_CONCURRENCY", "4")
 
     settings = Settings.from_env()
 
@@ -105,6 +108,7 @@ def test_env_overrides_config_file(tmp_path, monkeypatch):
     assert settings.embedding_model == "env-embed"
     # env beats file
     assert settings.top_k == 42
+    assert settings.cell_concurrency == 4
     # file still supplies fields env left alone
     assert settings.embedding_batch_size == 1
     assert settings.llm_temperature == 0.25
@@ -119,6 +123,7 @@ def test_config_typed_values_are_coerced(tmp_path, monkeypatch):
         embedding_batch_size = 128
         top_k = 16
         llm_temperature = 0.1
+        cell_concurrency = 3
         """,
     )
     monkeypatch.setenv(CONFIG_ENV_VAR, str(tmp_path / "explicit.toml"))
@@ -128,6 +133,21 @@ def test_config_typed_values_are_coerced(tmp_path, monkeypatch):
     assert settings.embedding_batch_size == 128
     assert settings.top_k == 16
     assert settings.llm_temperature == 0.1
+    assert settings.cell_concurrency == 3
+
+
+def test_cell_concurrency_is_at_least_one(tmp_path, monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    _write(
+        tmp_path / "explicit.toml",
+        """
+        cell_concurrency = 0
+        """,
+    )
+    monkeypatch.setenv(CONFIG_ENV_VAR, str(tmp_path / "explicit.toml"))
+
+    assert Settings.from_env().cell_concurrency == 1
 
 
 def test_config_data_dir_expands_user(tmp_path, monkeypatch):
@@ -240,6 +260,7 @@ def test_load_default_config_template_ships_documented_keys():
     assert "gateway_base_url" in template
     assert "llm_model" in template
     assert "embedding_model" in template
+    assert "cell_concurrency" in template
 
 
 def test_default_skills_dir_respects_env(monkeypatch, tmp_path):

@@ -149,6 +149,7 @@ class Settings:
     embedding_batch_size: int = 64
     top_k: int = 8
     llm_temperature: float = 0.0
+    cell_concurrency: int = 1
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -179,6 +180,9 @@ class Settings:
             top_k=_resolve_int("CATENA_TOP_K", "top_k", config, 8),
             llm_temperature=_resolve_float(
                 "CATENA_LLM_TEMPERATURE", "llm_temperature", config, 0.0
+            ),
+            cell_concurrency=max(
+                1, _resolve_int("CATENA_CELL_CONCURRENCY", "cell_concurrency", config, 1)
             ),
         )
 

@@ -36,6 +36,7 @@ def test_config_json_uses_stable_item_envelope(tmp_path):
     assert payload["item"]["data_dir"] == str(tmp_path)
     assert payload["item"]["gateway_ready"] is False
     assert payload["item"]["sqlite"] == str(tmp_path / "catena.sqlite")
+    assert payload["item"]["cell_concurrency"] == 1
 
 
 def _env_with_home(tmp_path, monkeypatch) -> dict[str, str]:

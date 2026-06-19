@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -663,11 +664,20 @@ class CatenaLibrary:
             ids = [cell.id for cell in cells if cell.id is not None]
 
         service = ExtractionService(self.settings)
-        results: list[ExtractionCell] = []
-        for cell_id in ids:
-            with Session(self.engine, expire_on_commit=False) as session:
-                results.append(await service.extract_cell(session, cell_id))
-        return results
+        concurrency = max(1, self.settings.cell_concurrency)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run_cell(cell_id: int) -> ExtractionCell:
+            async with semaphore:
+                with Session(self.engine, expire_on_commit=False) as session:
+                    return await service.extract_cell(session, cell_id)
+
+        if concurrency == 1:
+            results: list[ExtractionCell] = []
+            for cell_id in ids:
+                results.append(await run_cell(cell_id))
+            return results
+        return list(await asyncio.gather(*(run_cell(cell_id) for cell_id in ids)))
 
     async def ask(
         self,

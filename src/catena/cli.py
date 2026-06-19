@@ -1378,6 +1378,7 @@ def _settings_dict(settings: Settings) -> dict[str, Any]:
         "embedding_batch_size": settings.embedding_batch_size,
         "top_k": settings.top_k,
         "llm_temperature": settings.llm_temperature,
+        "cell_concurrency": settings.cell_concurrency,
     }
 
 

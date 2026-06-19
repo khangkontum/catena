@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -216,6 +217,59 @@ def test_add_paper_to_second_table_reuses_global_paper_and_queues_only_that_tabl
     assert len(cells) == 1
     assert cells[0].table_id == second_table.id
     assert cells[0].column_id == second_column.id
+
+
+@pytest.mark.asyncio
+async def test_run_pending_respects_cell_concurrency_and_result_order(monkeypatch, tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path, cell_concurrency=2))
+    library.init()
+    table_id = library.default_table_id()
+
+    with Session(library.engine) as session:
+        papers = [
+            Paper(title=f"Paper {index}", source_path=f"paper-{index}.pdf")
+            for index in range(3)
+        ]
+        session.add_all(papers)
+        session.commit()
+        for paper in papers:
+            session.refresh(paper)
+        paper_ids = [paper.id for paper in papers]
+
+    assert all(paper_id is not None for paper_id in paper_ids)
+    for paper_id in paper_ids:
+        library.add_paper_to_table(table_id, paper_id or 0)
+    library.add_column("Sample size", "What is the total sample size?", table_id=table_id)
+
+    with Session(library.engine) as session:
+        queued_ids = [
+            cell.id
+            for cell in session.exec(select(ExtractionCell).order_by(ExtractionCell.created_at))
+        ]
+
+    assert all(cell_id is not None for cell_id in queued_ids)
+    active = 0
+    max_active = 0
+    lock = asyncio.Lock()
+
+    async def fake_extract_cell(self, session: Session, cell_id: int) -> ExtractionCell:
+        nonlocal active, max_active
+        async with lock:
+            active += 1
+            max_active = max(max_active, active)
+        await asyncio.sleep(0.03 - (0.005 * cell_id))
+        async with lock:
+            active -= 1
+        cell = session.get(ExtractionCell, cell_id)
+        assert cell is not None
+        return cell
+
+    monkeypatch.setattr("catena.library.ExtractionService.extract_cell", fake_extract_cell)
+
+    results = await library.run_pending()
+
+    assert max_active == 2
+    assert [cell.id for cell in results] == queued_ids
 
 
 def test_compute_similarities_from_existing_chunk_embeddings(tmp_path):

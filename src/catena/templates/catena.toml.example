@@ -27,3 +27,4 @@ embedding_model = "text-embedding-3-small"
 embedding_batch_size = 64
 top_k = 8
 llm_temperature = 0.0
+cell_concurrency = 1
