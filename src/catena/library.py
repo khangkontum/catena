@@ -36,11 +36,22 @@ from catena.vector import LanceIndex
 
 
 @dataclass(frozen=True)
-class _PendingPdfIngestion:
+class RegisteredPaper:
+    """Row produced by `register_pdfs`: a paper id plus whether it was newly created."""
+
     paper_id: int
-    source: Path
-    paper_dir: Path
-    stored_pdf: Path
+    title: str
+    is_new: bool
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """Outcome of parsing/indexing one paper in `ingest_papers`."""
+
+    paper_id: int
+    parse_status: str
+    index_status: str
+    error: str | None = None
 
 
 class CatenaLibrary:
@@ -190,6 +201,69 @@ class CatenaLibrary:
         recreating the Docling pipeline per file.
         """
 
+        registered = self.register_pdfs(
+            paths,
+            table_id=table_id,
+            title=title,
+            doi=doi,
+            url=url,
+        )
+        new_ids = [item.paper_id for item in registered if item.is_new]
+        if new_ids:
+            await self.ingest_papers(paper_ids=new_ids)
+        return self._papers_by_ids([item.paper_id for item in registered])
+
+    def get_or_create_table_for_path(
+        self,
+        source_path: Path,
+        *,
+        name: str,
+        description: str | None = None,
+    ) -> ExtractionTable:
+        """Return the table bound to an exact resolved source path, creating it if absent.
+
+        Folder imports use the resolved absolute directory path as the durable identity
+        of their extraction table, so re-running an import against the same folder reuses
+        the same table (and content-hash-deduped papers) instead of creating a duplicate.
+        Different folders always map to different tables, eliminating name collisions.
+        """
+
+        self.init()
+        resolved = str(source_path)
+        with session_scope(self.engine) as session:
+            existing = session.exec(
+                select(ExtractionTable)
+                .where(ExtractionTable.source_path == resolved)
+                .order_by(ExtractionTable.id)
+            ).first()
+            if existing is not None:
+                return existing
+            table = ExtractionTable(
+                name=name,
+                description=description,
+                source_path=resolved,
+            )
+            session.add(table)
+            session.commit()
+            session.refresh(table)
+            return table
+
+    def register_pdfs(
+        self,
+        paths: list[Path],
+        *,
+        table_id: int | None = None,
+        title: str | None = None,
+        doi: str | None = None,
+        url: str | None = None,
+    ) -> list[RegisteredPaper]:
+        """Validate, dedup by content hash, create QUEUED Paper rows, copy PDFs into
+        storage, and attach them to the table. No parsing or embedding happens here.
+
+        Idempotent on content hash: an already-registered paper is reused (``is_new=False``)
+        rather than reprocessed. Pair with `ingest_papers` to parse/index new papers.
+        """
+
         self.init()
         sources = [_validated_pdf_path(path) for path in paths]
         if not sources:
@@ -197,8 +271,7 @@ class CatenaLibrary:
         if len(sources) > 1 and any(item is not None for item in (title, doi, url)):
             raise ValueError("title, doi, and url overrides are only supported for one PDF")
 
-        ordered_ids: list[int] = []
-        pending: list[_PendingPdfIngestion] = []
+        registered: list[RegisteredPaper] = []
         with session_scope(self.engine) as session:
             for source in sources:
                 content_hash = sha256_file(source)
@@ -208,7 +281,7 @@ class CatenaLibrary:
                 if existing is not None:
                     if existing.id is None:
                         raise RuntimeError("Existing paper has no id")
-                    ordered_ids.append(existing.id)
+                    registered.append(RegisteredPaper(existing.id, existing.title, False))
                     continue
 
                 paper = Paper(
@@ -217,7 +290,7 @@ class CatenaLibrary:
                     doi=doi,
                     url=url,
                     content_hash=content_hash,
-                    parse_status=Status.RUNNING,
+                    parse_status=Status.QUEUED,
                     index_status=Status.QUEUED,
                 )
                 session.add(paper)
@@ -227,64 +300,100 @@ class CatenaLibrary:
                     raise RuntimeError("Paper has no id")
                 paper_dir = self.settings.papers_dir / str(paper.id)
                 stored_pdf = copy_pdf(source, paper_dir)
-                ordered_ids.append(paper.id)
-                pending.append(
-                    _PendingPdfIngestion(
-                        paper_id=paper.id,
-                        source=source,
-                        paper_dir=paper_dir,
-                        stored_pdf=stored_pdf,
-                    )
-                )
+                paper.stored_pdf_path = str(stored_pdf)
+                session.add(paper)
+                session.commit()
+                registered.append(RegisteredPaper(paper.id, paper.title, True))
 
         if table_id is not None:
-            pending_ids = {item.paper_id for item in pending}
-            existing_ids = [paper_id for paper_id in ordered_ids if paper_id not in pending_ids]
-            for paper_id in existing_ids:
-                self.add_paper_to_table(table_id, paper_id)
+            for item in registered:
+                self.add_paper_to_table(table_id, item.paper_id)
 
-        if pending:
-            parsed_results = parse_pdfs([item.stored_pdf for item in pending])
-            for item, result in zip(pending, parsed_results, strict=True):
-                if result.document is None:
-                    error = result.error or "Docling conversion failed"
-                    self._mark_paper_failed(item.paper_id, error)
-                    continue
-                try:
-                    self._persist_parsed_document(item, result.document)
-                    await self.index_paper(item.paper_id)
-                    if table_id is not None:
-                        self.add_paper_to_table(table_id, item.paper_id)
-                except Exception as exc:
-                    self._mark_paper_failed(item.paper_id, str(exc))
+        return registered
 
-        return self._papers_by_ids(ordered_ids)
+    async def ingest_papers(
+        self,
+        *,
+        paper_ids: list[int] | None = None,
+        table_id: int | None = None,
+        retry_failed: bool = False,
+    ) -> list[IngestResult]:
+        """Batched Docling parse + embedding index for QUEUED papers (and FAILED if
+        ``retry_failed``). Scope by ``paper_ids`` and/or ``table_id``. Papers already
+        parsed/indexed are skipped. New papers in one call share a single Docling
+        `convert_all()` pass.
+        """
+
+        self.init()
+        parse_statuses = [Status.QUEUED]
+        if retry_failed:
+            parse_statuses.append(Status.FAILED)
+        with Session(self.engine, expire_on_commit=False) as session:
+            statement = select(Paper).where(Paper.parse_status.in_(parse_statuses))
+            if paper_ids is not None:
+                statement = statement.where(Paper.id.in_(paper_ids))  # type: ignore[union-attr]
+            if table_id is not None:
+                statement = statement.join(
+                    TablePaper, TablePaper.paper_id == Paper.id
+                ).where(TablePaper.table_id == table_id)
+            papers = session.exec(statement).all()
+
+        pending: list[tuple[int, Path]] = []
+        results: list[IngestResult] = []
+        for paper in papers:
+            if paper.id is None:
+                continue
+            if not paper.stored_pdf_path:
+                error = "No stored PDF path; cannot ingest"
+                self._mark_paper_failed(paper.id, error)
+                results.append(IngestResult(paper.id, Status.FAILED, Status.FAILED, error))
+                continue
+            pending.append((paper.id, Path(paper.stored_pdf_path)))
+
+        if not pending:
+            return results
+
+        parsed_results = parse_pdfs([path for _, path in pending])
+        for (paper_id, _stored), result in zip(pending, parsed_results, strict=True):
+            if result.document is None:
+                error = result.error or "Docling conversion failed"
+                self._mark_paper_failed(paper_id, error)
+                results.append(IngestResult(paper_id, Status.FAILED, Status.FAILED, error))
+                continue
+            try:
+                self._persist_parsed_document(paper_id, result.document)
+                await self.index_paper(paper_id)
+                results.append(IngestResult(paper_id, Status.PARSED, Status.INDEXED))
+            except Exception as exc:
+                self._mark_paper_failed(paper_id, str(exc))
+                results.append(IngestResult(paper_id, Status.FAILED, Status.FAILED, str(exc)))
+        return results
 
     def _persist_parsed_document(
         self,
-        item: _PendingPdfIngestion,
+        paper_id: int,
         parsed: ParsedDocument,
     ) -> None:
-        markdown_path = item.paper_dir / "document.md"
-        json_path = item.paper_dir / "docling.json"
+        paper_dir = self.settings.papers_dir / str(paper_id)
+        markdown_path = paper_dir / "document.md"
+        json_path = paper_dir / "docling.json"
         markdown_path.write_text(parsed.markdown, encoding="utf-8")
         write_json(json_path, parsed.docling_json)
 
         with session_scope(self.engine) as session:
-            paper = session.get(Paper, item.paper_id)
+            paper = session.get(Paper, paper_id)
             if paper is None:
                 raise RuntimeError("Paper disappeared during ingestion")
-            paper.stored_pdf_path = str(item.stored_pdf)
             paper.docling_json_path = str(json_path)
             paper.markdown_path = str(markdown_path)
             paper.parse_status = Status.PARSED
             paper.parse_error = None
             paper.updated_at = utcnow()
             session.add(paper)
-            session.exec(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
+            session.exec(delete(PaperChunk).where(PaperChunk.paper_id == paper_id))
             chunks = [
                 PaperChunk(
-                    paper_id=paper.id or 0,
+                    paper_id=paper_id,
                     chunk_index=chunk.index,
                     text=chunk.text,
                     page_start=chunk.page_start,

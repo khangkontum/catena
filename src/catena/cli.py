@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -11,9 +12,16 @@ from catena.config import Settings
 from catena.db import show_db_current, show_db_history, upgrade_db
 from catena.filters import PaperFilter
 from catena.library import CatenaLibrary
-from catena.models import ExtractionCell, ExtractionTable, Paper, PaperSimilarity, TablePaper
+from catena.models import (
+    ExtractionCell,
+    ExtractionColumn,
+    ExtractionTable,
+    Paper,
+    Status,
+    TablePaper,
+    Tag,
+)
 from catena.qa import OneOffAnswer
-from catena.similarity import SimilarPaper
 from catena.util import truncate
 
 console = Console()
@@ -22,14 +30,28 @@ tables_app = typer.Typer(help="Manage extraction tables.")
 papers_app = typer.Typer(help="Manage global papers.")
 tags_app = typer.Typer(help="Manage paper tags.")
 columns_app = typer.Typer(help="Manage extraction columns.")
-similarity_app = typer.Typer(help="Compute and inspect paper-pair similarity scores.")
 db_app = typer.Typer(help="Manage Alembic database migrations.")
 app.add_typer(tables_app, name="tables")
 app.add_typer(papers_app, name="papers")
 app.add_typer(tags_app, name="tags")
 app.add_typer(columns_app, name="columns")
-app.add_typer(similarity_app, name="similarity")
 app.add_typer(db_app, name="db")
+
+_json_output = False
+
+
+@app.callback()
+def main(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON instead of human-readable output where supported.",
+    ),
+) -> None:
+    """Local evidence-backed paper extraction tables."""
+
+    global _json_output
+    _json_output = json_output
 
 
 def _library() -> CatenaLibrary:
@@ -91,6 +113,9 @@ def init() -> None:
 
     library = _library()
     library.init()
+    if _json_output:
+        _emit_ok(data_dir=str(library.settings.data_dir))
+        return
     console.print(f"[green]Initialized[/green] {library.settings.data_dir}")
 
 
@@ -99,15 +124,16 @@ def config() -> None:
     """Show resolved local paths and gateway readiness."""
 
     settings = Settings.from_env()
+    item = _settings_dict(settings)
+    if _json_output:
+        _emit_item(item)
+        return
+
     table = Table(title="catena config")
     table.add_column("Key")
     table.add_column("Value")
-    table.add_row("data_dir", str(settings.data_dir))
-    table.add_row("sqlite", str(settings.sqlite_path))
-    table.add_row("lancedb", str(settings.lancedb_uri))
-    table.add_row("gateway_ready", "yes" if settings.gateway_ready else "no")
-    table.add_row("llm_model", settings.llm_model or "")
-    table.add_row("embedding_model", settings.embedding_model or "")
+    for key, value in item.items():
+        table.add_row(key, _display_value(value))
     console.print(table)
 
 
@@ -117,6 +143,9 @@ def db_upgrade(revision: str = typer.Argument("head", help="Alembic revision."))
 
     library = _library()
     upgrade_db(library.engine, revision)
+    if _json_output:
+        _emit_ok(revision=revision)
+        return
     console.print(f"[green]Database upgraded[/green] to {revision}")
 
 
@@ -142,6 +171,9 @@ def create_table(
     """Create an extraction table."""
 
     table = _library().create_table(name, description)
+    if _json_output:
+        _emit_ok(item=_table_dict(table))
+        return
     _print_table(table)
 
 
@@ -195,6 +227,13 @@ def create_table_from_filter(
         paper_filter,
         description=description,
     )
+    if _json_output:
+        _emit_ok(
+            item=_table_dict(table),
+            attached_papers=[_paper_dict(paper) for paper in papers],
+            attached_count=len(papers),
+        )
+        return
     _print_table(table)
     console.print(f"  attached papers: {len(papers)}")
 
@@ -207,6 +246,13 @@ def refresh_table(
     """Refresh a filtered table after adding tags or metadata."""
 
     papers = _library().refresh_table_from_filter(table_id, prune=prune)
+    if _json_output:
+        _emit_ok(
+            table_id=table_id,
+            items=[_paper_dict(paper) for paper in papers],
+            count=len(papers),
+        )
+        return
     console.print(f"[green]Refreshed[/green] table {table_id}; matching papers: {len(papers)}")
 
 
@@ -214,17 +260,53 @@ def refresh_table(
 def list_tables() -> None:
     """List extraction tables."""
 
+    tables = _library().tables()
+    if _json_output:
+        _emit_items([_table_dict(table) for table in tables])
+        return
+
     rich_table = Table(title="Extraction tables")
     rich_table.add_column("ID", justify="right")
     rich_table.add_column("Name")
     rich_table.add_column("Description")
     rich_table.add_column("Filtered")
-    for table in _library().tables():
+    for table in tables:
         rich_table.add_row(
             str(table.id),
             table.name,
             table.description or "",
             "yes" if table.source_filter_json else "no",
+        )
+    console.print(rich_table)
+
+
+@tables_app.command("show")
+def show_table(
+    table_id: int | None = typer.Option(None, "--table-id", help="Table id. Defaults to Default."),
+) -> None:
+    """Show one extraction matrix."""
+
+    library = _library()
+    resolved_table_id = _resolve_table_id(library, table_id)
+    extraction_table, columns, rows = library.table_rows(resolved_table_id)
+    if _json_output:
+        _emit_json(_table_matrix_dict(extraction_table, columns, rows))
+        return
+
+    rich_table = Table(title=f"catena: {extraction_table.name} ({resolved_table_id})")
+    rich_table.add_column("ID", justify="right", no_wrap=True)
+    rich_table.add_column("Paper")
+    rich_table.add_column("Parse", no_wrap=True)
+    rich_table.add_column("Index", no_wrap=True)
+    for column in columns:
+        rich_table.add_column(column.name)
+    for row in rows:
+        rich_table.add_row(
+            row["id"],
+            truncate(row["title"], 50),
+            row["parse_status"],
+            row["index_status"],
+            *[truncate(row.get(column.name, ""), 50) for column in columns],
         )
     console.print(rich_table)
 
@@ -237,6 +319,9 @@ def add_paper_to_table(
     """Attach an existing global paper to a table and queue that table's columns."""
 
     membership = _library().add_paper_to_table(table_id, paper_id)
+    if _json_output:
+        _emit_ok(item=_membership_dict(membership))
+        return
     _print_membership(membership)
 
 
@@ -248,10 +333,11 @@ def list_table_papers(
 
     library = _library()
     resolved_table_id = _resolve_table_id(library, table_id)
-    _print_papers(
-        library.papers(table_id=resolved_table_id),
-        title=f"Papers in table {resolved_table_id}",
-    )
+    papers = library.papers(table_id=resolved_table_id)
+    if _json_output:
+        _emit_items(_paper_dicts_with_tags(library, papers), table_id=resolved_table_id)
+        return
+    _print_papers(papers, title=f"Papers in table {resolved_table_id}")
 
 
 @papers_app.command("add")
@@ -283,9 +369,335 @@ def add_paper(
     paper = asyncio.run(
         library.add_pdf(pdf, title=title, doi=doi, url=url, table_id=resolved_table_id)
     )
+    if _json_output:
+        _emit_ok(
+            item=_paper_dict(paper, tags=_tags_for_paper(library, paper)),
+            table_id=resolved_table_id,
+        )
+        return
     _print_paper(paper)
     if resolved_table_id is not None:
         console.print(f"  table: {resolved_table_id}")
+
+
+@papers_app.command("add-dir")
+def add_dir(
+    directory: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        readable=True,
+        help="Folder of PDFs to import. Recurses by default.",
+    ),
+    table_id: int | None = typer.Option(
+        None,
+        "--table-id",
+        help="Attach to this existing table instead of deriving one from the folder.",
+    ),
+    table_name: str | None = typer.Option(
+        None,
+        "--table-name",
+        help="Override the derived table name (derived from the last two path segments).",
+    ),
+    no_table: bool = typer.Option(
+        False,
+        "--no-table",
+        help="Only register papers globally; attach to no table.",
+    ),
+    recursive: bool = typer.Option(
+        True,
+        "--recursive/--no-recursive",
+        help="Recurse into subfolders. Default: on.",
+    ),
+    run: bool = typer.Option(
+        False,
+        "--run",
+        help="After ingest, run queued extraction cells in the target table.",
+    ),
+    register_only: bool = typer.Option(
+        False,
+        "--async",
+        help="Register papers only; exit before parsing/indexing. Poll with "
+        "`papers import-status`. Incompatible with --run.",
+    ),
+) -> None:
+    """Import a folder of PDFs into one table bound to the folder path.
+
+    By default the table is derived from the imported directory's resolved absolute
+    path: the same folder always maps to the same table, so re-running the import is
+    idempotent (papers dedup by content hash; the table and its memberships are reused).
+    Default behavior registers, parses, and indexes in one blocking call. Use --async
+    to register only and defer parsing to `papers ingest` (run detached, poll status).
+    """
+
+    if register_only and run:
+        raise typer.BadParameter(
+            "--async cannot be combined with --run: nothing is parsed yet. "
+            "Run `catena run --table-id N` after `catena papers ingest` completes."
+        )
+    if no_table and (table_id is not None or table_name is not None):
+        raise typer.BadParameter("--no-table cannot be combined with --table-id or --table-name.")
+
+    resolved_dir = directory.expanduser().resolve()
+    pdfs = _collect_pdfs(resolved_dir, recursive=recursive)
+    if not pdfs:
+        raise typer.BadParameter(f"No PDF files found in {resolved_dir}")
+
+    library = _library()
+
+    source_path: str | None = None
+    derived_name: str | None = None
+    if no_table:
+        resolved_table_id: int | None = None
+    elif table_id is not None:
+        resolved_table_id = table_id
+    else:
+        derived_name = table_name or _folder_table_name(resolved_dir)
+        table = library.get_or_create_table_for_path(
+            resolved_dir,
+            name=derived_name,
+            description=f"Imported from {resolved_dir}",
+        )
+        resolved_table_id = table.id
+        source_path = table.source_path
+        derived_name = table.name
+
+    registered = library.register_pdfs(pdfs, table_id=resolved_table_id)
+    new_papers = [item for item in registered if item.is_new]
+    existing_papers = [item for item in registered if not item.is_new]
+
+    if register_only:
+        next_hint = (
+            f"catena papers ingest --table-id {resolved_table_id}"
+            if resolved_table_id is not None
+            else "catena papers ingest --all"
+        )
+        if _json_output:
+            _emit_ok(
+                table_id=resolved_table_id,
+                table_name=derived_name,
+                source_path=source_path,
+                registered=[_registered_dict(item) for item in registered],
+                queued=len(new_papers),
+                existing=len(existing_papers),
+                ingested=[],
+                next=next_hint,
+            )
+            return
+        console.print(f"[green]Registered[/green] {len(registered)} PDF(s)")
+        if resolved_table_id is not None:
+            console.print(
+                f"  table: {resolved_table_id} ({derived_name})"
+                + (f"  source: {source_path}" if source_path else "")
+            )
+        console.print(f"  new: {len(new_papers)}  existing: {len(existing_papers)}")
+        console.print(f"  next: {next_hint}")
+        return
+
+    ingest_results: list[Any] = []
+    if new_papers:
+        ingest_results = asyncio.run(
+            library.ingest_papers(paper_ids=[item.paper_id for item in new_papers])
+        )
+        if not _json_output:
+            for result in ingest_results:
+                mark = (
+                    "[green]parsed[/green]"
+                    if result.parse_status == Status.PARSED
+                    else "[red]failed[/red]"
+                )
+                console.print(f"  paper {result.paper_id}: {mark}")
+                if result.error:
+                    console.print(f"    [red]error:[/red] {result.error}")
+
+    run_results: list[ExtractionCell] = []
+    if run and resolved_table_id is not None:
+        run_results = asyncio.run(library.run_pending(table_id=resolved_table_id))
+
+    if _json_output:
+        payload: dict[str, Any] = {
+            "table_id": resolved_table_id,
+            "table_name": derived_name,
+            "source_path": source_path,
+            "registered": [_registered_dict(item) for item in registered],
+            "queued": len(new_papers),
+            "existing": len(existing_papers),
+            "ingested": [_ingest_result_dict(result) for result in ingest_results],
+        }
+        if run and resolved_table_id is not None:
+            payload["run_results"] = [_cell_dict(cell) for cell in run_results]
+            payload["run_count"] = len(run_results)
+        _emit_ok(**payload)
+        return
+
+    console.print(
+        f"[green]Imported[/green] {len(registered)} PDF(s) into table {resolved_table_id}"
+        if resolved_table_id is not None
+        else f"[green]Imported[/green] {len(registered)} PDF(s) into global library"
+    )
+    if run and run_results:
+        _print_run_results(run_results)
+
+
+@papers_app.command("ingest")
+def ingest(
+    table_id: int | None = typer.Option(
+        None,
+        "--table-id",
+        help="Ingest QUEUED papers in this table. Required unless --all.",
+    ),
+    all_papers: bool = typer.Option(
+        False,
+        "--all",
+        help="Ingest all QUEUED papers globally. Use either --table-id or --all.",
+    ),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="Also re-ingest FAILED papers.",
+    ),
+    run: bool = typer.Option(
+        False,
+        "--run",
+        help="After ingest, run queued extraction cells in the table.",
+    ),
+) -> None:
+    """Parse and index previously registered (--async) papers.
+
+    Runs a single batched Docling pass over the QUEUED papers in scope (plus FAILED if
+    --retry-failed). Designed to be run detached (e.g. via zmx) while an agent polls
+    `papers import-status`. By default scoped to one table; pass --all for global scope.
+    """
+
+    if table_id is None and not all_papers:
+        raise typer.BadParameter("Provide --table-id or --all.")
+    if all_papers and table_id is not None:
+        raise typer.BadParameter("Use either --table-id or --all, not both.")
+
+    library = _library()
+    results = asyncio.run(
+        library.ingest_papers(
+            table_id=table_id,
+            retry_failed=retry_failed,
+        )
+    )
+    run_results: list[ExtractionCell] = []
+    if run and table_id is not None:
+        run_results = asyncio.run(library.run_pending(table_id=table_id))
+
+    if _json_output:
+        payload: dict[str, Any] = {
+            "items": [_ingest_result_dict(result) for result in results],
+            "count": len(results),
+            "table_id": table_id,
+        }
+        if run and table_id is not None:
+            payload["run_results"] = [_cell_dict(cell) for cell in run_results]
+            payload["run_count"] = len(run_results)
+        _emit_ok(**payload)
+        return
+
+    if not results:
+        console.print("No queued papers to ingest.")
+        return
+    for result in results:
+        mark = (
+            "[green]parsed[/green]"
+            if result.parse_status == Status.PARSED
+            else "[red]failed[/red]"
+        )
+        console.print(f"  paper {result.paper_id}: {mark}")
+        if result.error:
+            console.print(f"    [red]error:[/red] {result.error}")
+    if run and run_results:
+        _print_run_results(run_results)
+
+
+@papers_app.command("import-status")
+def import_status(
+    table_id: int | None = typer.Option(
+        None,
+        "--table-id",
+        help="Scope to a table. Defaults to all papers.",
+    ),
+) -> None:
+    """Show parse/index status counts and failures for registered papers.
+
+    Read-only poll for the async import flow: after `papers add-dir --async`, run this
+    (optionally scoped to the table) to see how many papers are queued/running/parsed/
+    indexed/failed, plus the error for each failed paper.
+    """
+
+    library = _library()
+    papers = library.papers(table_id=table_id)
+
+    parse_counts: dict[str, int] = {}
+    index_counts: dict[str, int] = {}
+    failed: list[dict[str, Any]] = []
+    for paper in papers:
+        parse_counts[paper.parse_status] = parse_counts.get(paper.parse_status, 0) + 1
+        index_counts[paper.index_status] = index_counts.get(paper.index_status, 0) + 1
+        if (
+            paper.parse_status == Status.FAILED
+            or paper.index_status == Status.FAILED
+        ) and paper.id is not None:
+            failed.append(
+                {
+                    "paper_id": paper.id,
+                    "title": paper.title,
+                    "parse_status": paper.parse_status,
+                    "index_status": paper.index_status,
+                    "error": paper.parse_error,
+                }
+            )
+
+    if _json_output:
+        _emit_ok(
+            table_id=table_id,
+            count=len(papers),
+            parse_status=parse_counts,
+            index_status=index_counts,
+            failed=failed,
+            items=[
+                {
+                    "paper_id": paper.id,
+                    "title": paper.title,
+                    "parse_status": paper.parse_status,
+                    "index_status": paper.index_status,
+                }
+                for paper in papers
+            ],
+        )
+        return
+
+    rich_table = Table(title=f"Import status{f' (table {table_id})' if table_id else ''}")
+    rich_table.add_column("Paper", justify="right")
+    rich_table.add_column("Title")
+    rich_table.add_column("Parse")
+    rich_table.add_column("Index")
+    for paper in papers:
+        rich_table.add_row(
+            str(paper.id),
+            truncate(paper.title, 60),
+            paper.parse_status,
+            paper.index_status,
+        )
+    console.print(rich_table)
+    if parse_counts.get(Status.QUEUED, 0) or parse_counts.get(Status.RUNNING, 0):
+        console.print(
+            f"  queued: {parse_counts.get(Status.QUEUED, 0)}  "
+            f"running: {parse_counts.get(Status.RUNNING, 0)}  "
+            f"parsed: {parse_counts.get(Status.PARSED, 0)}  "
+            f"indexed: {parse_counts.get(Status.INDEXED, 0)}  "
+            f"failed: {parse_counts.get(Status.FAILED, 0)}"
+        )
+    if failed:
+        console.print("[red]Failed papers:[/red]")
+        for item in failed:
+            console.print(
+                f"  paper {item['paper_id']}: {item['parse_status']}/"
+                f"{item['index_status']} - {item['error']}"
+            )
 
 
 @papers_app.command("list")
@@ -294,22 +706,13 @@ def list_papers(
 ) -> None:
     """List global papers, or papers in a specific table."""
 
+    library = _library()
+    papers = library.papers(table_id=table_id)
+    if _json_output:
+        _emit_items(_paper_dicts_with_tags(library, papers), table_id=table_id)
+        return
     title = "Papers" if table_id is None else f"Papers in table {table_id}"
-    _print_papers(_library().papers(table_id=table_id), title=title)
-
-
-@papers_app.command("similar")
-def similar_papers(
-    paper_id: int = typer.Argument(..., help="Paper id to find related papers for."),
-    limit: int = typer.Option(10, "--limit", "-n", help="Maximum similar papers to show."),
-    min_score: float | None = typer.Option(None, "--min-score", help="Minimum score to show."),
-) -> None:
-    """List papers with precomputed similarity scores for one paper."""
-
-    _print_similar_papers(
-        paper_id,
-        _library().similar_papers(paper_id, limit=limit, min_score=min_score),
-    )
+    _print_papers(papers, title=title)
 
 
 @papers_app.command("set-metadata")
@@ -323,7 +726,8 @@ def set_paper_metadata(
 ) -> None:
     """Manually set metadata used by table filters."""
 
-    paper = _library().set_paper_metadata(
+    library = _library()
+    paper = library.set_paper_metadata(
         paper_id,
         year=year,
         venue=venue,
@@ -331,6 +735,9 @@ def set_paper_metadata(
         doi=doi,
         abstract=abstract,
     )
+    if _json_output:
+        _emit_ok(item=_paper_dict(paper, tags=_tags_for_paper(library, paper)))
+        return
     _print_paper(paper)
 
 
@@ -348,11 +755,17 @@ def enrich_paper(
         paper_ids = [paper.id for paper in library.papers() if paper.id is not None]
     else:
         paper_ids = [paper_id]
+
+    papers: list[Paper] = []
     for resolved_paper_id in paper_ids:
         if resolved_paper_id is None:
             continue
         paper = asyncio.run(library.enrich_paper(resolved_paper_id))
-        _print_paper(paper)
+        papers.append(paper)
+        if not _json_output:
+            _print_paper(paper)
+    if _json_output:
+        _emit_ok(items=_paper_dicts_with_tags(library, papers), count=len(papers))
 
 
 @tags_app.command("create")
@@ -364,6 +777,9 @@ def create_tag(
     """Create or update a tag."""
 
     tag = _library().create_tag(name, color=color, description=description)
+    if _json_output:
+        _emit_ok(item=_tag_dict(tag))
+        return
     console.print(f"[green]Tag[/green] {tag.id}: {tag.name}")
 
 
@@ -371,12 +787,17 @@ def create_tag(
 def list_tags() -> None:
     """List tags."""
 
+    tags = _library().tags()
+    if _json_output:
+        _emit_items([_tag_dict(tag) for tag in tags])
+        return
+
     rich_table = Table(title="Tags")
     rich_table.add_column("ID", justify="right")
     rich_table.add_column("Name")
     rich_table.add_column("Color")
     rich_table.add_column("Description")
-    for tag in _library().tags():
+    for tag in tags:
         rich_table.add_row(str(tag.id), tag.name, tag.color or "", tag.description or "")
     console.print(rich_table)
 
@@ -389,9 +810,14 @@ def add_tag_to_paper(
     """Add tag(s) to a paper."""
 
     library = _library()
+    tagged: list[Tag] = []
     for tag_name in tags:
         tag = library.tag_paper(paper_id, tag_name)
-        console.print(f"[green]Tagged[/green] paper {paper_id} with {tag.name}")
+        tagged.append(tag)
+        if not _json_output:
+            console.print(f"[green]Tagged[/green] paper {paper_id} with {tag.name}")
+    if _json_output:
+        _emit_ok(paper_id=paper_id, items=[_tag_dict(tag) for tag in tagged], count=len(tagged))
 
 
 @tags_app.command("remove")
@@ -402,6 +828,9 @@ def remove_tag_from_paper(
     """Remove a tag from a paper."""
 
     _library().untag_paper(paper_id, tag)
+    if _json_output:
+        _emit_ok(paper_id=paper_id, tag=tag)
+        return
     console.print(f"[green]Removed[/green] tag {tag} from paper {paper_id}")
 
 
@@ -411,8 +840,13 @@ def papers_by_tag(
 ) -> None:
     """List papers that have all provided tags."""
 
+    library = _library()
     paper_filter = PaperFilter(tags_all=tag)
-    _print_papers(_library().filter_papers(paper_filter), title="Tagged papers")
+    papers = library.filter_papers(paper_filter)
+    if _json_output:
+        _emit_items(_paper_dicts_with_tags(library, papers), tags=tag)
+        return
+    _print_papers(papers, title="Tagged papers")
 
 
 @columns_app.command("add")
@@ -439,12 +873,22 @@ def add_column(
         retrieval_query=retrieval_query,
         top_k=top_k,
     )
+    results: list[ExtractionCell] = []
+    if run:
+        results = asyncio.run(library.run_pending(table_id=resolved_table_id, column_id=column.id))
+    if _json_output:
+        payload: dict[str, Any] = {"item": _column_dict(column), "table_id": resolved_table_id}
+        if run:
+            payload["run_results"] = [_cell_dict(cell) for cell in results]
+            payload["run_count"] = len(results)
+        _emit_ok(**payload)
+        return
+
     console.print(
         f"[green]Created column[/green] {column.id}: {column.name} "
         f"in table {resolved_table_id}"
     )
     if run:
-        results = asyncio.run(library.run_pending(table_id=resolved_table_id, column_id=column.id))
         _print_run_results(results)
 
 
@@ -454,13 +898,18 @@ def list_columns(
 ) -> None:
     """List extraction columns."""
 
+    columns = _library().columns(table_id=table_id)
+    if _json_output:
+        _emit_items([_column_dict(column) for column in columns], table_id=table_id)
+        return
+
     rich_table = Table(title="Extraction columns")
     rich_table.add_column("ID", justify="right")
     rich_table.add_column("Table", justify="right")
     rich_table.add_column("Name")
     rich_table.add_column("Prompt")
     rich_table.add_column("Top K")
-    for column in _library().columns(table_id=table_id):
+    for column in columns:
         rich_table.add_row(
             str(column.id),
             str(column.table_id),
@@ -469,46 +918,6 @@ def list_columns(
             str(column.top_k or "default"),
         )
     console.print(rich_table)
-
-
-@similarity_app.command("compute")
-def compute_similarity(
-    table_id: int | None = typer.Option(
-        None,
-        "--table-id",
-        help="Only compute pairs among papers in this table. Defaults to all papers.",
-    ),
-    paper_id: list[int] | None = typer.Option(
-        None,
-        "--paper-id",
-        help="Paper id to include. Repeat for an explicit set of papers.",
-    ),
-    display_limit: int = typer.Option(
-        50,
-        "--display-limit",
-        help="Maximum computed rows to print after storing all scores.",
-    ),
-) -> None:
-    """Compute local embedding-based similarity scores for paper pairs."""
-
-    if table_id is not None and paper_id:
-        raise typer.BadParameter("Use either --table-id or repeated --paper-id, not both.")
-    results = _library().compute_similarities(paper_ids=paper_id, table_id=table_id)
-    _print_similarity_results(results, display_limit=display_limit)
-
-
-@similarity_app.command("list")
-def list_similarity(
-    paper_id: int = typer.Argument(..., help="Paper id to find related papers for."),
-    limit: int = typer.Option(10, "--limit", "-n", help="Maximum similar papers to show."),
-    min_score: float | None = typer.Option(None, "--min-score", help="Minimum score to show."),
-) -> None:
-    """List papers with precomputed similarity scores for one paper."""
-
-    _print_similar_papers(
-        paper_id,
-        _library().similar_papers(paper_id, limit=limit, min_score=min_score),
-    )
 
 
 @app.command()
@@ -542,6 +951,9 @@ def ask(
             top_k=top_k,
         )
     )
+    if _json_output:
+        _emit_item(_answer_dict(answer))
+        return
     _print_one_off_answer(answer)
 
 
@@ -564,34 +976,11 @@ def run(
             retry_failed=retry_failed,
         )
     )
+    if _json_output:
+        message = None if results else "No queued cells found."
+        _emit_items([_cell_dict(cell) for cell in results], message=message)
+        return
     _print_run_results(results)
-
-
-@app.command()
-def table(
-    table_id: int | None = typer.Option(None, "--table-id", help="Table id. Defaults to Default."),
-) -> None:
-    """Show one extraction matrix."""
-
-    library = _library()
-    resolved_table_id = _resolve_table_id(library, table_id)
-    extraction_table, columns, rows = library.table_rows(resolved_table_id)
-    rich_table = Table(title=f"catena: {extraction_table.name} ({resolved_table_id})")
-    rich_table.add_column("ID", justify="right", no_wrap=True)
-    rich_table.add_column("Paper")
-    rich_table.add_column("Parse", no_wrap=True)
-    rich_table.add_column("Index", no_wrap=True)
-    for column in columns:
-        rich_table.add_column(column.name)
-    for row in rows:
-        rich_table.add_row(
-            row["id"],
-            truncate(row["title"], 50),
-            row["parse_status"],
-            row["index_status"],
-            *[truncate(row.get(column.name, ""), 50) for column in columns],
-        )
-    console.print(rich_table)
 
 
 def _print_table(table: ExtractionTable) -> None:
@@ -653,56 +1042,6 @@ def _print_papers(papers: list[Paper], *, title: str) -> None:
     console.print(rich_table)
 
 
-def _print_similarity_results(results: list[PaperSimilarity], *, display_limit: int) -> None:
-    if not results:
-        console.print(
-            "No similarities computed. Add/index at least two papers with chunk embeddings first."
-        )
-        return
-    rich_table = Table(title="Computed paper similarities")
-    rich_table.add_column("Paper A", justify="right")
-    rich_table.add_column("Paper B", justify="right")
-    rich_table.add_column("Score", justify="right")
-    rich_table.add_column("Cosine", justify="right")
-    rich_table.add_column("Algorithm")
-    for row in results[: max(0, display_limit)]:
-        rich_table.add_row(
-            str(row.paper_id_a),
-            str(row.paper_id_b),
-            f"{row.score:.3f}",
-            f"{row.cosine_similarity:.3f}",
-            row.algorithm,
-        )
-    console.print(rich_table)
-    if len(results) > display_limit:
-        console.print(f"Stored {len(results)} rows; showing top {display_limit}.")
-
-
-def _print_similar_papers(paper_id: int, results: list[SimilarPaper]) -> None:
-    items = list(results)
-    if not items:
-        console.print(
-            f"No precomputed similarities found for paper {paper_id}. "
-            "Run `catena similarity compute` first."
-        )
-        return
-    rich_table = Table(title=f"Similar papers for {paper_id}")
-    rich_table.add_column("Paper", justify="right")
-    rich_table.add_column("Title")
-    rich_table.add_column("Score", justify="right")
-    rich_table.add_column("Cosine", justify="right")
-    rich_table.add_column("Algorithm")
-    for item in items:
-        rich_table.add_row(
-            str(item.paper.id),
-            truncate(item.paper.title, 70),
-            f"{item.similarity.score:.3f}",
-            f"{item.similarity.cosine_similarity:.3f}",
-            item.similarity.algorithm,
-        )
-    console.print(rich_table)
-
-
 def _print_one_off_answer(answer: OneOffAnswer) -> None:
     console.print("[bold]Answer[/bold]")
     console.print(answer.answer)
@@ -750,3 +1089,167 @@ def _print_run_results(results: list[ExtractionCell]) -> None:
             truncate(cell.answer_text or cell.error or "", 80),
         )
     console.print(rich_table)
+
+
+def _emit_json(payload: dict[str, Any]) -> None:
+    console.print_json(data=payload)
+
+
+def _emit_items(
+    items: list[dict[str, Any]],
+    *,
+    message: str | None = None,
+    **extra: Any,
+) -> None:
+    payload = {"items": items, "count": len(items), **extra}
+    if message is not None:
+        payload["message"] = message
+    _emit_json(payload)
+
+
+def _emit_item(item: dict[str, Any], **extra: Any) -> None:
+    _emit_json({"item": item, **extra})
+
+
+def _emit_ok(**extra: Any) -> None:
+    _emit_json({"ok": True, **extra})
+
+
+def _settings_dict(settings: Settings) -> dict[str, Any]:
+    return {
+        "data_dir": str(settings.data_dir),
+        "sqlite": str(settings.sqlite_path),
+        "lancedb": str(settings.lancedb_uri),
+        "gateway_ready": settings.gateway_ready,
+        "llm_model": settings.llm_model,
+        "embedding_model": settings.embedding_model,
+        "embedding_batch_size": settings.embedding_batch_size,
+        "top_k": settings.top_k,
+        "llm_temperature": settings.llm_temperature,
+    }
+
+
+def _model_dict(item: Any) -> dict[str, Any]:
+    if hasattr(item, "model_dump"):
+        dumped = item.model_dump(mode="json")
+        if isinstance(dumped, dict):
+            return dumped
+    raise TypeError(f"Cannot serialize {type(item).__name__}")
+
+
+def _table_dict(table: ExtractionTable) -> dict[str, Any]:
+    return _model_dict(table)
+
+
+def _paper_dict(paper: Paper, *, tags: list[str] | None = None) -> dict[str, Any]:
+    item = _model_dict(paper)
+    if tags is not None:
+        item["tags"] = tags
+    return item
+
+
+def _paper_dicts_with_tags(library: CatenaLibrary, papers: list[Paper]) -> list[dict[str, Any]]:
+    return [_paper_dict(paper, tags=_tags_for_paper(library, paper)) for paper in papers]
+
+
+def _tags_for_paper(library: CatenaLibrary, paper: Paper) -> list[str]:
+    if paper.id is None:
+        return []
+    return library.paper_tag_names(paper.id)
+
+
+def _tag_dict(tag: Tag) -> dict[str, Any]:
+    return _model_dict(tag)
+
+
+def _column_dict(column: ExtractionColumn) -> dict[str, Any]:
+    return _model_dict(column)
+
+
+def _membership_dict(membership: TablePaper) -> dict[str, Any]:
+    return _model_dict(membership)
+
+
+def _cell_dict(cell: ExtractionCell) -> dict[str, Any]:
+    return _model_dict(cell)
+
+
+def _answer_dict(answer: OneOffAnswer) -> dict[str, Any]:
+    return {
+        "question": answer.question,
+        "paper_ids": answer.paper_ids,
+        "answer": answer.answer,
+        "evidence": answer.evidence,
+        "confidence": answer.confidence,
+        "rationale": answer.rationale,
+        "raw": answer.raw,
+        "retrieved_chunk_ids": answer.retrieved_chunk_ids,
+    }
+
+
+def _table_matrix_dict(
+    table: ExtractionTable,
+    columns: list[ExtractionColumn],
+    rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "item": _table_dict(table),
+        "columns": [_column_dict(column) for column in columns],
+        "rows": [
+            {
+                "paper_id": int(row["id"]),
+                "title": row["title"],
+                "parse_status": row["parse_status"],
+                "index_status": row["index_status"],
+                "values": [
+                    {
+                        "column_id": column.id,
+                        "column_name": column.name,
+                        "value": row.get(column.name, ""),
+                    }
+                    for column in columns
+                ],
+            }
+            for row in rows
+        ],
+    }
+
+
+def _display_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _collect_pdfs(directory: Path, *, recursive: bool) -> list[Path]:
+    iterator = directory.rglob("*") if recursive else directory.glob("*")
+    return sorted(p for p in iterator if p.is_file() and p.suffix.lower() == ".pdf")
+
+
+def _folder_table_name(directory: Path) -> str:
+    """Stable display name from the last two path segments of a resolved folder.
+
+    The durable identity of a folder-import table is its resolved absolute path
+    (stored on the table), not this name; this slug only makes `tables list` readable
+    and disambiguates folders that share a basename.
+    """
+
+    parts = [p for p in directory.parts if p not in ("/", "\\")]
+    tail = parts[-2:] if len(parts) >= 2 else parts
+    slug = "-".join(tail).strip()
+    return slug or directory.name or "import"
+
+
+def _registered_dict(item: Any) -> dict[str, Any]:
+    return {"paper_id": item.paper_id, "title": item.title, "is_new": item.is_new}
+
+
+def _ingest_result_dict(result: Any) -> dict[str, Any]:
+    return {
+        "paper_id": result.paper_id,
+        "parse_status": result.parse_status,
+        "index_status": result.index_status,
+        "error": result.error,
+    }

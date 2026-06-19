@@ -97,6 +97,11 @@ class ExtractionTable(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     description: str | None = None
+    # Resolved absolute path of the source folder for `papers add-dir` imports.
+    # Acts as the durable identity of an import table: the same folder always maps
+    # to the same table, so re-running an import is idempotent. Null for tables
+    # created any other way (Default, `tables create`, filtered tables).
+    source_path: str | None = Field(default=None, index=True)
     source_filter_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

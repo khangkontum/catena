@@ -65,7 +65,11 @@ mise exec -- uv run catena init
 # add and index a PDF globally, then attach it to the Default table
 mise exec -- uv run catena papers add ./paper.pdf --title "My paper"
 
-# create another table
+# import a whole folder of PDFs into one table bound to that folder's path
+# (see "Folder imports & async ingestion" below)
+mise exec -- uv run catena papers add-dir ./cohort
+
+# create another table by hand
 mise exec -- uv run catena tables create "Screening table"
 
 # attach an already indexed global paper to another table without reparsing/re-embedding
@@ -88,14 +92,61 @@ mise exec -- uv run catena ask "What is the core contribution?" --paper-id 1
 mise exec -- uv run catena ask "Compare these papers." --paper-id 1 --paper-id 2
 mise exec -- uv run catena ask "What themes appear in this table?" --table-id 2
 
-# compute local embedding-based paper-pair similarity scores
-mise exec -- uv run catena similarity compute
-mise exec -- uv run catena similarity compute --table-id 2
-mise exec -- uv run catena papers similar 1
-
 # show one extraction matrix; defaults to the Default table
-mise exec -- uv run catena table
-mise exec -- uv run catena table --table-id 2
+mise exec -- uv run catena tables show
+mise exec -- uv run catena tables show --table-id 2
+```
+
+## Folder imports & async ingestion
+
+`papers add-dir` imports a folder of PDFs into a single extraction table. The table is
+**bound to the resolved absolute path of the imported directory**: the same folder always
+maps to the same table, so re-running an import is idempotent (papers dedup by content
+hash; the table and its memberships are reused, never duplicated). Different folders always
+map to different tables, so there are no name collisions to resolve. The folder path is
+stored on the table as `source_path` (null for tables created any other way).
+
+Default behavior is **blocking**: register, parse (one batched Docling pass), and index in
+one call. Use `--async` to register only and defer the heavy parsing to `papers ingest`,
+which an agent can run detached (e.g. via `zmx`) while polling `papers import-status`.
+
+```bash
+# blocking: import, parse, and index all PDFs in ./cohort (recurses by default)
+mise exec -- uv run catena papers add-dir ./cohort
+
+# import into your own table instead of the folder-derived one
+mise exec -- uv run catena papers add-dir ./cohort --table-id 7
+
+# register only, then parse detached and poll
+mise exec -- uv run catena papers add-dir ./cohort --async
+# -> {"ok": true, "table_id": 7, "queued": 42, "existing": 0, "next": "catena papers ingest --table-id 7"}
+
+zmx run ingest-7 -d 'mise exec -- uv run catena papers ingest --table-id 7'
+mise exec -- uv run catena papers import-status --table-id 7   # poll until indexed: 42
+
+# also run the table's queued extraction cells right after parsing
+mise exec -- uv run catena papers add-dir ./cohort --run
+mise exec -- uv run catena papers ingest --table-id 7 --run
+
+# re-ingest papers that failed last time
+mise exec -- uv run catena papers ingest --table-id 7 --retry-failed
+
+# import a flat folder without descending into subfolders
+mise exec -- uv run catena papers add-dir ./flat --no-recursive
+```
+
+`--async --run` is rejected (nothing is parsed yet); run `catena run --table-id N` after
+`papers ingest` completes instead. `papers ingest` is scoped to one table by default;
+pass `--all` to ingest every queued paper globally.
+
+## JSON output
+
+Every command accepts a global `--json` flag that emits a stable, machine-readable
+envelope (top-level `ok`/`item`/`items`/`count` plus command-specific fields) instead of
+rich text. This is the contract agents should parse; human output remains the default.
+
+```bash
+mise exec -- uv run catena --json papers add-dir ./cohort --async
 ```
 
 ## Multi-table design

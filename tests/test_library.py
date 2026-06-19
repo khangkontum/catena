@@ -20,7 +20,7 @@ def test_init_runs_alembic_and_creates_default_table(tmp_path):
     with sqlite3.connect(tmp_path / "catena.sqlite") as connection:
         revision = connection.execute("select version_num from alembic_version").fetchone()
 
-    assert revision == ("20260617_0002",)
+    assert revision == ("20260619_0003",)
     assert library.default_table_id() == 1
 
 
