@@ -8,7 +8,15 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from catena.config import Settings
+from catena.config import (
+    Settings,
+    config_search_paths,
+    default_config_path,
+    default_skills_dir,
+    find_config_file,
+    load_default_config_template,
+    load_skill_template,
+)
 from catena.db import show_db_current, show_db_history, upgrade_db
 from catena.filters import PaperFilter
 from catena.library import CatenaLibrary
@@ -26,6 +34,8 @@ from catena.util import truncate
 
 console = Console()
 app = typer.Typer(help="Local evidence-backed paper extraction tables.")
+config_app = typer.Typer(help="Manage catena configuration.")
+skill_app = typer.Typer(help="Manage the catena agent skill.")
 tables_app = typer.Typer(help="Manage extraction tables.")
 papers_app = typer.Typer(help="Manage global papers.")
 tags_app = typer.Typer(help="Manage paper tags.")
@@ -36,6 +46,8 @@ app.add_typer(papers_app, name="papers")
 app.add_typer(tags_app, name="tags")
 app.add_typer(columns_app, name="columns")
 app.add_typer(db_app, name="db")
+app.add_typer(config_app, name="config")
+app.add_typer(skill_app, name="skill")
 
 _json_output = False
 
@@ -119,12 +131,23 @@ def init() -> None:
     console.print(f"[green]Initialized[/green] {library.settings.data_dir}")
 
 
-@app.command()
-def config() -> None:
-    """Show resolved local paths and gateway readiness."""
+@config_app.callback(invoke_without_command=True)
+def config(
+    ctx: typer.Context,
+) -> None:
+    """Show resolved local paths, gateway readiness, and config file source.
 
+    With no subcommand, prints the resolved configuration. Run
+    `catena config init` to write a starter config file.
+    """
+
+    if ctx.invoked_subcommand is not None:
+        return
     settings = Settings.from_env()
+    config_path = find_config_file()
     item = _settings_dict(settings)
+    item["config_path"] = str(config_path) if config_path else None
+    item["config_search_paths"] = [str(p) for p in config_search_paths()]
     if _json_output:
         _emit_item(item)
         return
@@ -133,8 +156,94 @@ def config() -> None:
     table.add_column("Key")
     table.add_column("Value")
     for key, value in item.items():
-        table.add_row(key, _display_value(value))
+        if key == "config_search_paths":
+            table.add_row(key, "\n".join(["- " + _display_value(v) for v in value] or [""]))
+        else:
+            table.add_row(key, _display_value(value))
     console.print(table)
+
+
+@config_app.command("init")
+def config_init(
+    path: Path | None = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Target file. Defaults to the first XDG config search path.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing config file.",
+    ),
+) -> None:
+    """Write a starter config file to the default location.
+
+    Writes the packaged template to ~/.config/catena/config.toml (respecting
+    $XDG_CONFIG_HOME) unless --path is given. Refuses to overwrite an existing
+    file unless --force is passed.
+    """
+
+    target = path if path is not None else default_config_path()
+    if target.exists() and not force:
+        msg = f"{target} already exists; pass --force to overwrite."
+        if _json_output:
+            _emit_json({"ok": False, "error": msg, "path": str(target)})
+        else:
+            console.print(f"[red]error:[/red] {msg}")
+        raise typer.Exit(1)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(load_default_config_template(), encoding="utf-8")
+    if _json_output:
+        _emit_ok(path=str(target))
+        return
+    console.print(f"[green]Wrote[/green] {target}")
+
+
+@skill_app.command("install")
+def skill_install(
+    dir: Path | None = typer.Option(
+        None,
+        "--dir",
+        "-d",
+        help="Skills root directory. Defaults to ~/.agents/skills ($CATENA_SKILLS_DIR).",
+    ),
+    name: str = typer.Option(
+        "catena",
+        "--name",
+        "-n",
+        help="Skill folder name (default: catena).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing SKILL.md.",
+    ),
+) -> None:
+    """Install the catena agent skill (writes SKILL.md).
+
+    Writes to <dir>/<name>/SKILL.md. Defaults to ~/.agents/skills/catena/SKILL.md so any
+    agent scanning that root picks it up. Refuses to overwrite an existing file unless
+    --force is passed.
+    """
+
+    root = dir if dir is not None else default_skills_dir()
+    target = root / name / "SKILL.md"
+    if target.exists() and not force:
+        msg = f"{target} already exists; pass --force to overwrite."
+        if _json_output:
+            _emit_json({"ok": False, "error": msg, "path": str(target)})
+        else:
+            console.print(f"[red]error:[/red] {msg}")
+        raise typer.Exit(1)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(load_skill_template(), encoding="utf-8")
+    if _json_output:
+        _emit_ok(path=str(target), name=name)
+        return
+    console.print(f"[green]Installed[/green] skill `{name}` -> {target}")
 
 
 @db_app.command("upgrade")

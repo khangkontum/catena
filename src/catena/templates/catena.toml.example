@@ -1,0 +1,29 @@
+# catena config file. Copy to one of these locations to configure once, use
+# everywhere (first existing file wins; see `catena config` for the full list):
+#
+#   $CATENA_CONFIG                       (explicit override)
+#   ./catena.toml                        (cwd-local, shadows global)
+#   ~/.config/catena/config.toml         (XDG default)
+#   ~/.config/catena/catena.toml
+#   ~/.config/catena.toml
+#   ~/catena.toml
+#   ~/.catena.toml
+#
+# Environment variables (LLM_*, CATENA_*) take precedence over this file, so
+# secrets can stay in mise.local.toml [env] while non-secret defaults live here.
+
+# Local storage location for the SQLite db, LanceDB index, and PDFs.
+# Supports "~" and "$ENV". Defaults to ".catena" (cwd) when unset.
+data_dir = "~/catena-data"
+
+# OpenAI-compatible gateway. Leave unset for local DB-only commands
+# (catena init, catena papers list, catena tables show).
+gateway_base_url = "https://api.openai.com/v1"
+gateway_api_key = "replace-me"
+llm_model = "gpt-4o"
+embedding_model = "text-embedding-3-small"
+
+# Retrieval / generation tuning.
+embedding_batch_size = 64
+top_k = 8
+llm_temperature = 0.0

@@ -1,32 +1,82 @@
 # catena
 
-`catena` is a local-first Python package for building Elicit-style evidence tables over PDFs.
-
-The interface is a CLI. The app model is:
-
-- papers are stored once in a global library;
-- extraction tables select any subset of global papers;
-- each user-created column is an atomic extraction question in one table;
-- each cell is an evidence-backed BAML/LLM answer for one table, one paper, and one column.
+A local-first CLI for building Elicit-style evidence tables over PDFs. Papers are stored
+once in a global library; extraction tables select subsets; each column is one atomic
+extraction question; each cell is an evidence-backed BAML/LLM answer.
 
 ## Stack
 
-- `uv` for Python builds/environments.
-- `mise` owns the project `uv` version.
-- SQLite/SQLModel for source-of-truth data.
-- Alembic for formal schema migrations.
-- Docling for local PDF parsing/chunking.
-- LanceDB for local vector retrieval.
-- OpenAI-compatible gateway for all LLM and embedding calls.
-- BAML for structured extraction outputs.
+`uv` · SQLite/SQLModel (source of truth) · Alembic (migrations) · Docling (PDF parsing)
+· LanceDB (vector retrieval) · OpenAI-compatible gateway (LLM + embeddings) · BAML
+(structured extraction).
 
-No local-model backend is configured or supported by default.
+## Installation
+
+Requires Python 3.11+. Remote: <https://github.com/khangkontum/catena>.
+
+```bash
+mise install 'pipx:git+https://github.com/khangkontum/catena.git@main'   # mise
+uv tool install git+https://github.com/khangkontum/catena.git            # uv
+pip install git+https://github.com/khangkontum/catena.git                # pip
+```
+
+## Agent skill
+
+Install a catena skill so coding agents (Pi, Claude Code, Codex, …) know how to drive
+the CLI. Writes `SKILL.md` to the default skills root (`~/.agents/skills`, or
+`$CATENA_SKILLS_DIR`):
+
+```bash
+catena skill install                # ~/.agents/skills/catena/SKILL.md
+catena skill install --force         # overwrite
+catena skill install --dir DIR       # custom skills root
+catena skill install --name lit-review
+```
 
 ## Setup
 
-Fill in `mise.local.toml`:
+Settings resolve in this order (highest first): environment variables (`LLM_*`,
+`CATENA_*`) → a discovered TOML config file → defaults. `catena config` shows which
+file is loaded and the full search order.
+
+### Config file
+
+Auto-discovered from the first existing path:
+
+1. `$CATENA_CONFIG`
+2. `./catena.toml`
+3. `$XDG_CONFIG_HOME/catena/config.toml` → `~/.config/catena/config.toml`
+4. `~/.config/catena/catena.toml`
+5. `~/.config/catena.toml`
+6. `~/catena.toml`
+7. `~/.catena.toml`
 
 ```toml
+# ~/.config/catena/config.toml — configure once, use everywhere
+data_dir = "~/catena-data"
+gateway_base_url = "https://api.openai.com/v1"
+gateway_api_key = "..."
+llm_model = "gpt-4o"
+embedding_model = "text-embedding-3-small"
+top_k = 12
+```
+
+Keys: `data_dir`, `gateway_base_url`, `gateway_api_key`, `llm_model`,
+`embedding_model`, `embedding_batch_size`, `top_k`, `llm_temperature`. Omitted fields
+fall back to env vars then defaults — keep secrets in `mise.local.toml [env]`.
+
+Write a starter config to the default location (`~/.config/catena/config.toml`):
+
+```bash
+catena config init                # errors if it already exists
+catena config init --force        # overwrite
+catena config init --path FILE    # write elsewhere
+```
+
+### Environment variables
+
+```toml
+# mise.local.toml (per-project, untracked)
 [env]
 LLM_GATEWAY_BASE_URL = "https://your-gateway.example/v1"
 LLM_GATEWAY_API_KEY = "..."
@@ -34,124 +84,62 @@ LLM_MODEL = "..."
 LLM_EMBEDDING_MODEL = "..."
 ```
 
-Then:
+One-time init creates `.catena/` storage and runs migrations to head:
 
 ```bash
-mise trust -a -y
-mise run sync
-mise exec -- uv run baml-cli generate
-mise run api:init
+catena init
 ```
 
-`catena init` / `mise run api:init` creates local storage and runs Alembic migrations to `head`.
-You can also manage migrations explicitly:
-
-```bash
-mise exec -- uv run catena db upgrade head
-mise exec -- uv run catena db current
-mise exec -- uv run catena db history
-
-# Equivalent direct Alembic usage:
-mise exec -- uv run alembic -c alembic.ini upgrade head
-mise exec -- uv run alembic -c alembic.ini revision --autogenerate -m "describe change"
-```
+Manage migrations explicitly: `catena db upgrade head` / `current` / `history`.
 
 ## Common CLI flow
 
 ```bash
-# initialize .catena/ storage and the Default table
-mise exec -- uv run catena init
-
-# add and index a PDF globally, then attach it to the Default table
-mise exec -- uv run catena papers add ./paper.pdf --title "My paper"
-
-# import a whole folder of PDFs into one table bound to that folder's path
-# (see "Folder imports & async ingestion" below)
-mise exec -- uv run catena papers add-dir ./cohort
-
-# create another table by hand
-mise exec -- uv run catena tables create "Screening table"
-
-# attach an already indexed global paper to another table without reparsing/re-embedding
-mise exec -- uv run catena tables add-paper 2 1
-
-# add an extraction column to the Default table and run its queued cells
-mise exec -- uv run catena columns add "Sample size" "What is the total sample size?" --run
-
-# add an extraction column to another table
-mise exec -- uv run catena columns add "Core method" "What is the core method?" --table-id 2 --run
-
-# run all queued cells across all tables
-mise exec -- uv run catena run
-
-# run queued cells in one table
-mise exec -- uv run catena run --table-id 2
-
-# one-off Q&A over selected papers; no chat history is stored or reused
-mise exec -- uv run catena ask "What is the core contribution?" --paper-id 1
-mise exec -- uv run catena ask "Compare these papers." --paper-id 1 --paper-id 2
-mise exec -- uv run catena ask "What themes appear in this table?" --table-id 2
-
-# show one extraction matrix; defaults to the Default table
-mise exec -- uv run catena tables show
-mise exec -- uv run catena tables show --table-id 2
+catena papers add ./paper.pdf --title "My paper"
+catena papers add-dir ./cohort          # folder import, idempotent
+catena tables create "Screening table"
+catena tables add-paper 2 1             # attach global paper to another table
+catena columns add "Sample size" "What is the total sample size?" --run
+catena columns add "Core method" "What is the core method?" --table-id 2 --run
+catena run                              # all queued cells across all tables
+catena run --table-id 2
+catena ask "What is the core contribution?" --paper-id 1
+catena ask "Compare these papers." --paper-id 1 --paper-id 2
+catena tables show                      # the matrix; defaults to the Default table
 ```
 
 ## Folder imports & async ingestion
 
-`papers add-dir` imports a folder of PDFs into a single extraction table. The table is
-**bound to the resolved absolute path of the imported directory**: the same folder always
-maps to the same table, so re-running an import is idempotent (papers dedup by content
-hash; the table and its memberships are reused, never duplicated). Different folders always
-map to different tables, so there are no name collisions to resolve. The folder path is
-stored on the table as `source_path` (null for tables created any other way).
+`papers add-dir` imports a folder into one table **bound to the folder's resolved absolute
+path** — the same folder always maps to the same table. The path is stored on the table as `source_path`.
 
-Default behavior is **blocking**: register, parse (one batched Docling pass), and index in
-one call. Use `--async` to register only and defer the heavy parsing to `papers ingest`,
-which an agent can run detached (e.g. via `zmx`) while polling `papers import-status`.
+Blocking by default (register → parse → index). Use `--async` to register only and defer
+parsing to `papers ingest` (run detached, poll `papers import-status`):
 
 ```bash
-# blocking: import, parse, and index all PDFs in ./cohort (recurses by default)
-mise exec -- uv run catena papers add-dir ./cohort
-
-# import into your own table instead of the folder-derived one
-mise exec -- uv run catena papers add-dir ./cohort --table-id 7
-
-# register only, then parse detached and poll
-mise exec -- uv run catena papers add-dir ./cohort --async
-# -> {"ok": true, "table_id": 7, "queued": 42, "existing": 0, "next": "catena papers ingest --table-id 7"}
-
-zmx run ingest-7 -d 'mise exec -- uv run catena papers ingest --table-id 7'
-mise exec -- uv run catena papers import-status --table-id 7   # poll until indexed: 42
-
-# also run the table's queued extraction cells right after parsing
-mise exec -- uv run catena papers add-dir ./cohort --run
-mise exec -- uv run catena papers ingest --table-id 7 --run
-
-# re-ingest papers that failed last time
-mise exec -- uv run catena papers ingest --table-id 7 --retry-failed
-
-# import a flat folder without descending into subfolders
-mise exec -- uv run catena papers add-dir ./flat --no-recursive
+catena papers add-dir ./cohort --async
+# -> {"ok": true, "table_id": 7, "queued": 42, "next": "catena papers ingest --table-id 7"}
+catena papers ingest --table-id 7
+catena papers import-status --table-id 7    # poll until indexed
+catena papers ingest --table-id 7 --run     # also run queued cells after parsing
+catena papers ingest --table-id 7 --retry-failed
 ```
 
-`--async --run` is rejected (nothing is parsed yet); run `catena run --table-id N` after
-`papers ingest` completes instead. `papers ingest` is scoped to one table by default;
-pass `--all` to ingest every queued paper globally.
+Run `catena run --table-id N` after `ingest`. `ingest` is scoped to one table; `--all` ingests globally.
 
 ## JSON output
 
-Every command accepts a global `--json` flag that emits a stable, machine-readable
-envelope (top-level `ok`/`item`/`items`/`count` plus command-specific fields) instead of
-rich text. This is the contract agents should parse; human output remains the default.
+Every command takes a global `--json` flag emitting a stable envelope
+(`ok`/`item`/`items`/`count` + command-specific fields).
 
 ```bash
-mise exec -- uv run catena --json papers add-dir ./cohort --async
+catena --json papers add-dir ./cohort --async
 ```
 
 ## Multi-table design
 
-SQLite is authoritative. LanceDB is a rebuildable retrieval index derived from global paper chunks.
+SQLite is authoritative; LanceDB is a rebuildable retrieval index over global paper
+chunks.
 
 ```txt
 .catena/
@@ -164,6 +152,5 @@ SQLite is authoritative. LanceDB is a rebuildable retrieval index derived from g
       docling.json
 ```
 
-Adding a paper to another table creates table-specific queued cells only. It does not rerun Docling or embeddings.
-
-Paper similarity scores are stored in SQLite and are derived from existing LanceDB chunk embeddings. The default algorithm averages normalized chunk vectors into one paper centroid, then stores cosine similarity for each paper pair.
+Adding a paper to another table creates table-specific queued cells only — no rerun of
+Docling or embeddings.

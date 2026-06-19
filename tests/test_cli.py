@@ -37,6 +37,155 @@ def test_config_json_uses_stable_item_envelope(tmp_path):
     assert payload["item"]["sqlite"] == str(tmp_path / "catena.sqlite")
 
 
+def _env_with_home(tmp_path, monkeypatch) -> dict[str, str]:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("CATENA_CONFIG", raising=False)
+    env = _env(tmp_path)
+    env["HOME"] = str(tmp_path / "home")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    return env
+
+
+def test_config_init_writes_default_location_and_reports_path(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    expected = tmp_path / "xdg" / "catena" / "config.toml"
+    assert not expected.exists()
+
+    result = runner.invoke(app, ["--json", "config", "init"], env=env)
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["path"] == str(expected)
+    assert expected.is_file()
+    written = expected.read_text(encoding="utf-8")
+    assert "data_dir" in written
+    assert "gateway_base_url" in written
+
+    # the just-written file is now discoverable by `catena config`
+    config_result = runner.invoke(app, ["--json", "config"], env=env)
+    assert config_result.exit_code == 0, config_result.output
+    config_payload = json.loads(config_result.output)
+    assert config_payload["item"]["config_path"] == str(expected)
+
+
+def test_config_init_refuses_to_overwrite_without_force(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    target = tmp_path / "xdg" / "catena" / "config.toml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# pre-existing\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--json", "config", "init"], env=env)
+    assert result.exit_code == 1, result.output
+
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "already exists" in payload["error"]
+    assert payload["path"] == str(target)
+    assert target.read_text(encoding="utf-8") == "# pre-existing\n"  # untouched
+
+
+def test_config_init_force_overwrites(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    target = tmp_path / "xdg" / "catena" / "config.toml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# stale\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--json", "config", "init", "--force"], env=env)
+    assert result.exit_code == 0, result.output
+    assert "data_dir" in target.read_text(encoding="utf-8")
+
+
+def test_config_init_path_override(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    custom = tmp_path / "nested" / "custom.toml"
+
+    result = runner.invoke(
+        app, ["--json", "config", "init", "--path", str(custom)], env=env
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["path"] == str(custom)
+    assert custom.is_file()
+    assert custom.parent.exists()  # parent dirs created
+
+
+def test_skill_install_writes_default_location(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    expected = tmp_path / "home" / ".agents" / "skills" / "catena" / "SKILL.md"
+    assert not expected.exists()
+
+    result = runner.invoke(app, ["--json", "skill", "install"], env=env)
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["name"] == "catena"
+    assert payload["path"] == str(expected)
+    assert expected.is_file()
+    text = expected.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "name: catena" in text
+
+
+def test_skill_install_refuses_to_overwrite_without_force(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    root = tmp_path / "home" / ".agents" / "skills"
+    target = root / "catena" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# pre-existing\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--json", "skill", "install"], env=env)
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "already exists" in payload["error"]
+    assert target.read_text(encoding="utf-8") == "# pre-existing\n"  # untouched
+
+
+def test_skill_install_force_overwrites(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    target = tmp_path / "home" / ".agents" / "skills" / "catena" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# stale\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--json", "skill", "install", "--force"], env=env)
+    assert result.exit_code == 0, result.output
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "# stale\n" not in text
+
+
+def test_skill_install_dir_and_name_overrides(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    env["CATENA_SKILLS_DIR"] = str(tmp_path / "default-skills")  # env override
+    custom_root = tmp_path / "custom" / "skills"
+
+    result = runner.invoke(
+        app,
+        ["--json", "skill", "install", "--dir", str(custom_root), "--name", "lit-review"],
+        env=env,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    custom_target = custom_root / "lit-review" / "SKILL.md"
+    assert payload["path"] == str(custom_target)
+    assert custom_target.is_file()
+    # --dir wins over CATENA_SKILLS_DIR env
+    assert not (tmp_path / "default-skills").exists()
+
+
+def test_skill_install_uses_env_default_skills_dir(tmp_path, monkeypatch):
+    env = _env_with_home(tmp_path, monkeypatch)
+    env["CATENA_SKILLS_DIR"] = str(tmp_path / "env-skills")
+
+    result = runner.invoke(app, ["--json", "skill", "install"], env=env)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["path"] == str(tmp_path / "env-skills" / "catena" / "SKILL.md")
+
+
 def test_table_json_create_list_and_show(tmp_path):
     created = invoke_json(["tables", "create", "Screening", "--description", "Review"], tmp_path)
 
