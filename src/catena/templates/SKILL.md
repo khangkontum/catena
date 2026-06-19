@@ -21,23 +21,13 @@ description: >-
 
 SQLite is authoritative; LanceDB is a rebuildable retrieval index over global paper chunks.
 
-## Before using it
+## Prerequisites
 
-Confirm the CLI is available:
-
-```bash
-catena --version 2>/dev/null || mise exec -- uv run catena --version
-```
-
-Run inside `~/.config/catena/config.toml` (or env vars / `mise.local.toml`). Check the
-resolved config and gateway readiness:
-
-```bash
-catena config
-```
-
-If `gateway_ready` is `no`, LLM/embedding calls will fail — set `gateway_base_url`,
-`gateway_api_key`, `llm_model`, `embedding_model` first.
+Assume `catena` is on `PATH`. Most commands are local (DB + vector index) and need no
+gateway; only `run`, `columns add --run`, `ask`, and `enrich` call the LLM/embedding
+gateway. So don't pre-check `catena --version` or `catena config` on every mention —
+skip straight to the command for the task. If a command fails, see
+[Troubleshooting](#troubleshooting).
 
 ## JSON contract (parse this, not the rich text)
 
@@ -114,3 +104,29 @@ catena tables add-paper 2 1     # table_id paper_id
 - Keep secrets in env / `mise.local.toml [env]`; non-secret defaults in the config file.
 - Local DB-only commands (`init`, `papers list`, `tables show`, `config`) run with no gateway
   configured; LLM calls (`run`, `columns add --run`, `ask`, `enrich`) require gateway settings.
+
+## Troubleshooting
+
+Run these only when something fails — never as a preamble before each task.
+
+### `catena: command not found`
+
+```bash
+which catena                                            # is the binary installed at all?
+mise exec -- uv run catena --version                    # project checkout: prefix every cmd with `mise exec -- uv run `
+mise install 'pipx:git+https://github.com/khangkontum/catena.git@master'   # default branch is master
+```
+
+### Gateway errors (LLM tasks: `run`, `ask`, `enrich`, `columns add --run` only)
+
+DB/index commands succeed with no gateway. If an LLM command fails, inspect the
+resolved config once, then retry — don't pre-check in advance:
+
+```bash
+catena config
+```
+
+If `gateway_ready` is `no`, set in `~/.config/catena/config.toml` (or env vars /
+`mise.local.toml [env]`): `gateway_base_url`, `gateway_api_key`, `llm_model`,
+`embedding_model`. Keep secrets in env / `mise.local.toml`; non-secret defaults in the
+config file.
