@@ -207,6 +207,8 @@ def test_config_search_paths_includes_documented_locations(tmp_path, monkeypatch
 def test_require_gateway_message_mentions_config_file(tmp_path, monkeypatch):
     _clear_llm_env(monkeypatch)
     monkeypatch.setenv("CATENA_DATA_DIR", str(tmp_path / ".catena"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
     try:
         Settings.from_env().require_gateway()

@@ -6,8 +6,9 @@ from sqlmodel import Session
 from typer.testing import CliRunner
 
 from catena.cli import app
+from catena.config import Settings
 from catena.library import CatenaLibrary
-from catena.models import Paper, Status
+from catena.models import Paper, PaperChunk, Status
 from catena.parsing import ParsedChunk, ParsedDocument, ParsedPdfResult
 
 runner = CliRunner()
@@ -371,3 +372,38 @@ def test_ingest_all_processes_every_queued_paper(tmp_path, fake_ingest):
     payload = invoke_json(["papers", "ingest", "--all"], tmp_path)
     assert payload["count"] == 2
     assert [item["index_status"] for item in payload["items"]] == ["indexed"] * 2
+
+
+def test_search_json_returns_local_text_hits(tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    library.init()
+    with Session(library.engine, expire_on_commit=False) as session:
+        paper = Paper(
+            title="Fast Local Search",
+            source_path="paper.pdf",
+            parse_status=Status.PARSED,
+            index_status=Status.INDEXED,
+        )
+        session.add(paper)
+        session.commit()
+        session.refresh(paper)
+        assert paper.id is not None
+        session.add(
+            PaperChunk(
+                paper_id=paper.id,
+                chunk_index=0,
+                text="SQLite FTS provides fast local exact text retrieval.",
+                page_start=2,
+                heading="Search",
+            )
+        )
+        session.commit()
+    library.rebuild_search_index()
+
+    payload = invoke_json(["search", "exact text retrieval", "--mode", "text"], tmp_path)
+
+    assert payload["query"] == "exact text retrieval"
+    assert payload["mode"] == "text"
+    assert payload["count"] == 1
+    assert payload["items"][0]["paper_title"] == "Fast Local Search"
+    assert payload["items"][0]["page_start"] == 2

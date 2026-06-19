@@ -30,6 +30,7 @@ from catena.models import (
     Tag,
 )
 from catena.qa import OneOffAnswer
+from catena.search import SearchResult
 from catena.util import truncate
 
 console = Console()
@@ -1067,6 +1068,51 @@ def ask(
 
 
 @app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query, paper title, or exact text."),
+    mode: str = typer.Option(
+        "auto",
+        "--mode",
+        help="Search mode: auto, hybrid, semantic, text, title, or exact.",
+    ),
+    paper_id: list[int] | None = typer.Option(
+        None,
+        "--paper-id",
+        help="Paper id to include. Can be supplied multiple times.",
+    ),
+    table_id: int | None = typer.Option(
+        None,
+        "--table-id",
+        help="Search papers in this table. Ignored when --paper-id is supplied.",
+    ),
+    top_k: int | None = typer.Option(
+        None,
+        "--top-k",
+        help="Maximum results. Defaults to CATENA_TOP_K.",
+    ),
+) -> None:
+    """Search the local paper library by title, exact text, FTS, semantic, or hybrid ranking."""
+
+    if mode not in {"auto", "hybrid", "semantic", "text", "title", "exact"}:
+        raise typer.BadParameter(
+            "--mode must be one of: auto, hybrid, semantic, text, title, exact"
+        )
+    results = asyncio.run(
+        _library().search(
+            query,
+            mode=mode,  # type: ignore[arg-type]
+            paper_ids=paper_id,
+            table_id=table_id,
+            top_k=top_k,
+        )
+    )
+    if _json_output:
+        _emit_items([_search_result_dict(result) for result in results], query=query, mode=mode)
+        return
+    _print_search_results(results)
+
+
+@app.command()
 def run(
     table_id: int | None = typer.Option(None, "--table-id", help="Only run one table."),
     column_id: int | None = typer.Option(None, "--column-id", help="Only run one column."),
@@ -1175,6 +1221,31 @@ def _print_one_off_answer(answer: OneOffAnswer) -> None:
                 truncate(str(item.get("quote") or ""), 110),
             )
         console.print(rich_table)
+
+
+def _print_search_results(results: list[SearchResult]) -> None:
+    if not results:
+        console.print("No search results found.")
+        return
+    rich_table = Table(title="Search results")
+    rich_table.add_column("Score", justify="right")
+    rich_table.add_column("Kind")
+    rich_table.add_column("Paper", justify="right")
+    rich_table.add_column("Title")
+    rich_table.add_column("Page", justify="right")
+    rich_table.add_column("Heading")
+    rich_table.add_column("Snippet")
+    for result in results:
+        rich_table.add_row(
+            f"{result.score:.4f}",
+            result.kind,
+            str(result.paper_id),
+            truncate(result.paper_title, 42),
+            str(result.page_start or ""),
+            truncate(result.heading or "", 24),
+            truncate(result.snippet, 80),
+        )
+    console.print(rich_table)
 
 
 def _print_run_results(results: list[ExtractionCell]) -> None:
@@ -1293,6 +1364,22 @@ def _answer_dict(answer: OneOffAnswer) -> dict[str, Any]:
         "rationale": answer.rationale,
         "raw": answer.raw,
         "retrieved_chunk_ids": answer.retrieved_chunk_ids,
+    }
+
+
+def _search_result_dict(result: SearchResult) -> dict[str, Any]:
+    return {
+        "paper_id": result.paper_id,
+        "paper_title": result.paper_title,
+        "score": result.score,
+        "kind": result.kind,
+        "snippet": result.snippet,
+        "chunk_id": result.chunk_id,
+        "chunk_index": result.chunk_index,
+        "page_start": result.page_start,
+        "page_end": result.page_end,
+        "heading": result.heading,
+        "component_scores": result.component_scores,
     }
 
 

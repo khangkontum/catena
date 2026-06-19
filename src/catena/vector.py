@@ -54,16 +54,26 @@ class LanceIndex:
         table.add(rows)
 
     def search(self, query_vector: list[float], *, paper_id: int, limit: int) -> list[SearchHit]:
+        return self.search_many(query_vector, paper_ids={paper_id}, limit=limit)
+
+    def search_many(
+        self,
+        query_vector: list[float],
+        *,
+        paper_ids: set[int] | None = None,
+        limit: int,
+    ) -> list[SearchHit]:
         db = self._connect()
         if CHUNKS_TABLE not in _table_names(db):
             return []
         table = db.open_table(CHUNKS_TABLE)
-        rows = (
-            table.search(query_vector)
-            .where(f"paper_id = {paper_id}")
-            .limit(max(1, limit))
-            .to_list()
-        )
+        query = table.search(query_vector)
+        if paper_ids is not None:
+            if not paper_ids:
+                return []
+            ids = ", ".join(str(int(paper_id)) for paper_id in sorted(paper_ids))
+            query = query.where(f"paper_id IN ({ids})")
+        rows = query.limit(max(1, limit)).to_list()
         return [_hit_from_row(row) for row in rows]
 
     def chunk_vectors(self, *, paper_ids: set[int] | None = None) -> list[ChunkVector]:

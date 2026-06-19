@@ -241,9 +241,8 @@ def _first_env_or_config(
     env_keys: tuple[str, ...], config_key: str, config: dict[str, Any]
 ) -> str | None:
     for key in env_keys:
-        env_value = _blank_to_none(os.environ.get(key))
-        if env_value is not None:
-            return env_value
+        if key in os.environ:
+            return _blank_to_none(os.environ.get(key))
     return _blank_to_none(_config_str(config, config_key))
 
 

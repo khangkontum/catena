@@ -20,7 +20,7 @@ def test_init_runs_alembic_and_creates_default_table(tmp_path):
     with sqlite3.connect(tmp_path / "catena.sqlite") as connection:
         revision = connection.execute("select version_num from alembic_version").fetchone()
 
-    assert revision == ("20260619_0003",)
+    assert revision == ("20260619_0004",)
     assert library.default_table_id() == 1
 
 
@@ -286,3 +286,75 @@ def test_tags_and_filter_table_creation_do_not_duplicate_papers(tmp_path):
     assert len(papers) == 2
     assert len(memberships) == 1
     assert memberships[0].paper_id == paper_a_id
+
+
+@pytest.mark.asyncio
+async def test_search_supports_title_text_exact_and_table_scope(tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    library.init()
+    table = library.create_table("Neural papers")
+
+    with Session(library.engine, expire_on_commit=False) as session:
+        paper_a = Paper(
+            title="Graph Neural Networks for Molecules",
+            source_path="a.pdf",
+            abstract="Molecular property prediction with message passing.",
+            parse_status=Status.PARSED,
+            index_status=Status.INDEXED,
+        )
+        paper_b = Paper(
+            title="Kernel Methods",
+            source_path="b.pdf",
+            abstract="Classical models.",
+            parse_status=Status.PARSED,
+            index_status=Status.INDEXED,
+        )
+        session.add_all([paper_a, paper_b])
+        session.commit()
+        session.refresh(paper_a)
+        session.refresh(paper_b)
+        assert paper_a.id is not None
+        assert paper_b.id is not None
+        session.add_all(
+            [
+                PaperChunk(
+                    paper_id=paper_a.id,
+                    chunk_index=0,
+                    text="The model uses message passing neural updates.",
+                    page_start=3,
+                    heading="Method",
+                ),
+                PaperChunk(
+                    paper_id=paper_b.id,
+                    chunk_index=0,
+                    text="The appendix discusses support vector machines.",
+                    page_start=9,
+                    heading="Appendix",
+                ),
+            ]
+        )
+        session.commit()
+        paper_a_id = paper_a.id
+        paper_b_id = paper_b.id
+
+    library.add_paper_to_table(table.id or 0, paper_a_id)
+    library.rebuild_search_index()
+
+    title_hits = await library.search("graph neural", mode="title", top_k=5)
+    assert [hit.paper_id for hit in title_hits] == [paper_a_id]
+
+    text_hits = await library.search("message passing", mode="text", top_k=5)
+    assert text_hits[0].paper_id == paper_a_id
+    assert text_hits[0].chunk_id is not None
+
+    exact_hits = await library.search("support vector machines", mode="exact", top_k=5)
+    assert exact_hits[0].paper_id == paper_b_id
+    assert exact_hits[0].kind == "exact_text"
+
+    scoped_hits = await library.search(
+        "support vector machines",
+        mode="exact",
+        table_id=table.id,
+        top_k=5,
+    )
+    assert scoped_hits == []

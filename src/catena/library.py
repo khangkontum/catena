@@ -30,6 +30,7 @@ from catena.models import (
 )
 from catena.parsing import PARSER_HASH, ParsedDocument, parse_pdfs
 from catena.qa import OneOffAnswer, QuestionAnswerService
+from catena.search import SearchMode, SearchResult, SearchService, rebuild_search_index
 from catena.similarity import SimilarityService, SimilarPaper
 from catena.util import copy_pdf, safe_title_from_path, sha256_file, sha256_json, write_json
 from catena.vector import LanceIndex
@@ -406,6 +407,7 @@ class CatenaLibrary:
             ]
             session.add_all(chunks)
             session.commit()
+            rebuild_search_index(session, paper_id=paper_id)
 
     def _mark_paper_failed(self, paper_id: int, error: str) -> None:
         with session_scope(self.engine) as session:
@@ -582,6 +584,32 @@ class CatenaLibrary:
                 top_k=top_k,
             )
 
+    async def search(
+        self,
+        query: str,
+        *,
+        mode: SearchMode = "auto",
+        paper_ids: list[int] | None = None,
+        table_id: int | None = None,
+        top_k: int | None = None,
+    ) -> list[SearchResult]:
+        self.init()
+        service = SearchService(self.settings)
+        with Session(self.engine, expire_on_commit=False) as session:
+            return await service.search(
+                session,
+                query,
+                mode=mode,
+                paper_ids=paper_ids,
+                table_id=table_id,
+                top_k=top_k,
+            )
+
+    def rebuild_search_index(self, *, paper_id: int | None = None) -> None:
+        self.init()
+        with session_scope(self.engine) as session:
+            rebuild_search_index(session, paper_id=paper_id)
+
     def compute_similarities(
         self,
         *,
@@ -659,6 +687,7 @@ class CatenaLibrary:
             session.add(paper)
             session.commit()
             session.refresh(paper)
+            rebuild_search_index(session, paper_id=paper_id)
             return paper
 
     def set_paper_metadata(
@@ -690,6 +719,7 @@ class CatenaLibrary:
             session.add(paper)
             session.commit()
             session.refresh(paper)
+            rebuild_search_index(session, paper_id=paper_id)
             return paper
 
     def create_tag(
