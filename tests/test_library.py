@@ -93,6 +93,67 @@ async def test_add_pdfs_uses_one_batch_docling_parse(monkeypatch, tmp_path):
     assert len(memberships) == 2
 
 
+@pytest.mark.asyncio
+async def test_ingest_papers_marks_running_and_emits_progress(monkeypatch, tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    table_id = library.default_table_id()
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    registered = library.register_pdfs([first, second], table_id=table_id)
+    running_statuses: list[list[str]] = []
+
+    def fake_parse_pdfs(paths: list[Path]) -> list[ParsedPdfResult]:
+        with Session(library.engine) as session:
+            papers = session.exec(select(Paper).order_by(Paper.id)).all()
+            running_statuses.append([paper.parse_status for paper in papers])
+        return [
+            ParsedPdfResult(
+                path=path,
+                document=ParsedDocument(
+                    markdown=f"# {path.stem}",
+                    docling_json={"name": path.name},
+                    chunks=[
+                        ParsedChunk(
+                            index=0,
+                            text=f"chunk for {path.name}",
+                            page_start=1,
+                            page_end=1,
+                            heading=None,
+                            metadata={},
+                        )
+                    ],
+                ),
+            )
+            for path in paths
+        ]
+
+    async def fake_index_paper(self: CatenaLibrary, paper_id: int) -> None:
+        with Session(self.engine) as session:
+            paper = session.get(Paper, paper_id)
+            assert paper is not None
+            paper.index_status = Status.INDEXED
+            session.add(paper)
+            session.commit()
+
+    monkeypatch.setattr("catena.library.parse_pdfs", fake_parse_pdfs)
+    monkeypatch.setattr(CatenaLibrary, "index_paper", fake_index_paper)
+    events = []
+
+    results = await library.ingest_papers(
+        paper_ids=[item.paper_id for item in registered],
+        progress=events.append,
+    )
+
+    assert [result.index_status for result in results] == [Status.INDEXED, Status.INDEXED]
+    assert running_statuses == [[Status.RUNNING, Status.RUNNING]]
+    steps = [event.step for event in events]
+    assert steps[:3] == ["queued", "parse", "parse"]
+    assert "index" in steps
+    assert steps[-1] == "complete"
+
+
 def test_add_column_queues_cell_for_existing_table_paper(tmp_path):
     library = CatenaLibrary(Settings(data_dir=tmp_path))
     library.init()

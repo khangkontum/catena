@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from catena.config import (
@@ -19,7 +31,7 @@ from catena.config import (
 )
 from catena.db import show_db_current, show_db_history, upgrade_db
 from catena.filters import PaperFilter
-from catena.library import CatenaLibrary
+from catena.library import CatenaLibrary, IngestProgress, IngestProgressCallback
 from catena.models import (
     ExtractionCell,
     ExtractionColumn,
@@ -34,6 +46,7 @@ from catena.search import SearchResult
 from catena.util import truncate
 
 console = Console()
+stderr_console = Console(stderr=True)
 app = typer.Typer(help="Local evidence-backed paper extraction tables.")
 config_app = typer.Typer(help="Manage catena configuration.")
 skill_app = typer.Typer(help="Manage the catena agent skill.")
@@ -73,6 +86,54 @@ def _library() -> CatenaLibrary:
 
 def _resolve_table_id(library: CatenaLibrary, table_id: int | None) -> int:
     return table_id if table_id is not None else library.default_table_id()
+
+
+@contextmanager
+def _ingest_progress() -> Iterator[IngestProgressCallback]:
+    if _json_output:
+        yield _emit_ingest_progress_stderr
+        return
+
+    task_id: TaskID | None = None
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+
+        def report(event: IngestProgress) -> None:
+            nonlocal task_id
+            total = event.total or 0
+            if task_id is None:
+                task_id = progress.add_task(event.message, total=total)
+            if event.total is not None:
+                progress.update(task_id, total=event.total)
+            completed = (
+                event.current if event.current is not None else progress.tasks[task_id].completed
+            )
+            progress.update(task_id, completed=completed, description=event.message)
+            if event.error:
+                progress.console.print(f"[red]{event.message}:[/red] {event.error}")
+
+        yield report
+
+
+def _emit_ingest_progress_stderr(event: IngestProgress) -> None:
+    parts = [f"step={event.step}"]
+    if event.current is not None and event.total is not None:
+        parts.append(f"progress={event.current}/{event.total}")
+    elif event.total is not None:
+        parts.append(f"total={event.total}")
+    if event.paper_id is not None:
+        parts.append(f"paper_id={event.paper_id}")
+    parts.append(event.message)
+    if event.error:
+        parts.append(f"error={event.error}")
+    stderr_console.print("[catena] " + " ".join(parts), markup=False)
 
 
 def _build_paper_filter(
@@ -606,9 +667,13 @@ def add_dir(
 
     ingest_results: list[Any] = []
     if new_papers:
-        ingest_results = asyncio.run(
-            library.ingest_papers(paper_ids=[item.paper_id for item in new_papers])
-        )
+        with _ingest_progress() as progress:
+            ingest_results = asyncio.run(
+                library.ingest_papers(
+                    paper_ids=[item.paper_id for item in new_papers],
+                    progress=progress,
+                )
+            )
         if not _json_output:
             for result in ingest_results:
                 mark = (
@@ -685,12 +750,14 @@ def ingest(
         raise typer.BadParameter("Use either --table-id or --all, not both.")
 
     library = _library()
-    results = asyncio.run(
-        library.ingest_papers(
-            table_id=table_id,
-            retry_failed=retry_failed,
+    with _ingest_progress() as progress:
+        results = asyncio.run(
+            library.ingest_papers(
+                table_id=table_id,
+                retry_failed=retry_failed,
+                progress=progress,
+            )
         )
-    )
     run_results: list[ExtractionCell] = []
     if run and table_id is not None:
         run_results = asyncio.run(library.run_pending(table_id=table_id))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -53,6 +54,21 @@ class IngestResult:
     parse_status: str
     index_status: str
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class IngestProgress:
+    """Diagnostic event emitted while papers are parsed and indexed."""
+
+    step: str
+    message: str
+    paper_id: int | None = None
+    current: int | None = None
+    total: int | None = None
+    error: str | None = None
+
+
+IngestProgressCallback = Callable[[IngestProgress], None]
 
 
 class CatenaLibrary:
@@ -318,6 +334,7 @@ class CatenaLibrary:
         paper_ids: list[int] | None = None,
         table_id: int | None = None,
         retry_failed: bool = False,
+        progress: IngestProgressCallback | None = None,
     ) -> list[IngestResult]:
         """Batched Docling parse + embedding index for QUEUED papers (and FAILED if
         ``retry_failed``). Scope by ``paper_ids`` and/or ``table_id``. Papers already
@@ -352,22 +369,97 @@ class CatenaLibrary:
             pending.append((paper.id, Path(paper.stored_pdf_path)))
 
         if not pending:
+            if progress is not None:
+                progress(IngestProgress("queued", "No queued papers to ingest", total=0))
             return results
 
+        total = len(pending)
+        if progress is not None:
+            progress(IngestProgress("queued", f"Found {total} paper(s) to ingest", total=total))
+
+        self._mark_papers_running([paper_id for paper_id, _ in pending])
+        if progress is not None:
+            progress(IngestProgress("parse", "Starting Docling batch parse", total=total))
+
         parsed_results = parse_pdfs([path for _, path in pending])
+        if progress is not None:
+            progress(IngestProgress("parse", "Finished Docling batch parse", total=total))
+
         for (paper_id, _stored), result in zip(pending, parsed_results, strict=True):
+            current = len(results) + 1
             if result.document is None:
                 error = result.error or "Docling conversion failed"
                 self._mark_paper_failed(paper_id, error)
                 results.append(IngestResult(paper_id, Status.FAILED, Status.FAILED, error))
+                if progress is not None:
+                    progress(
+                        IngestProgress(
+                            "parse_failed",
+                            f"Paper {paper_id} parse failed",
+                            paper_id=paper_id,
+                            current=current,
+                            total=total,
+                            error=error,
+                        )
+                    )
                 continue
             try:
                 self._persist_parsed_document(paper_id, result.document)
+                if progress is not None:
+                    progress(
+                        IngestProgress(
+                            "parsed",
+                            f"Paper {paper_id} parsed",
+                            paper_id=paper_id,
+                            current=current,
+                            total=total,
+                        )
+                    )
+                    progress(
+                        IngestProgress(
+                            "index",
+                            f"Indexing paper {paper_id}",
+                            paper_id=paper_id,
+                            current=current,
+                            total=total,
+                        )
+                    )
                 await self.index_paper(paper_id)
                 results.append(IngestResult(paper_id, Status.PARSED, Status.INDEXED))
+                if progress is not None:
+                    progress(
+                        IngestProgress(
+                            "indexed",
+                            f"Paper {paper_id} indexed",
+                            paper_id=paper_id,
+                            current=current,
+                            total=total,
+                        )
+                    )
             except Exception as exc:
                 self._mark_paper_failed(paper_id, str(exc))
                 results.append(IngestResult(paper_id, Status.FAILED, Status.FAILED, str(exc)))
+                if progress is not None:
+                    progress(
+                        IngestProgress(
+                            "failed",
+                            f"Paper {paper_id} ingest failed",
+                            paper_id=paper_id,
+                            current=current,
+                            total=total,
+                            error=str(exc),
+                        )
+                    )
+        if progress is not None:
+            failed = sum(1 for result in results if result.parse_status == Status.FAILED)
+            progress(
+                IngestProgress(
+                    "complete",
+                    f"Ingest complete: {len(results) - failed} indexed, {failed} failed",
+                    current=len(results),
+                    total=total,
+                )
+            )
         return results
 
     def _persist_parsed_document(
@@ -418,6 +510,18 @@ class CatenaLibrary:
                 failed.parse_error = error
                 failed.updated_at = utcnow()
                 session.add(failed)
+
+    def _mark_papers_running(self, paper_ids: list[int]) -> None:
+        if not paper_ids:
+            return
+        with session_scope(self.engine) as session:
+            papers = session.exec(select(Paper).where(Paper.id.in_(paper_ids))).all()  # type: ignore[union-attr]
+            for paper in papers:
+                paper.parse_status = Status.RUNNING
+                paper.index_status = Status.QUEUED
+                paper.parse_error = None
+                paper.updated_at = utcnow()
+                session.add(paper)
 
     def _papers_by_ids(self, paper_ids: list[int]) -> list[Paper]:
         if not paper_ids:

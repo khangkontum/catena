@@ -17,7 +17,7 @@ runner = CliRunner()
 def invoke_json(args: list[str], tmp_path):
     result = runner.invoke(app, ["--json", *args], env=_env(tmp_path))
     assert result.exit_code == 0, result.output
-    return json.loads(result.output)
+    return json.loads(result.stdout)
 
 
 def _env(tmp_path) -> dict[str, str]:
@@ -299,6 +299,25 @@ def test_add_dir_imports_folder_into_path_bound_table(tmp_path, fake_ingest):
     assert len(fake_ingest) == 1  # no second parse
 
 
+def test_add_dir_json_keeps_stdout_parseable_and_writes_progress_to_stderr(
+    tmp_path,
+    fake_ingest,
+):
+    folder = tmp_path / "cohort"
+    _write_pdfs(folder, ["a.pdf", "b.pdf"])
+
+    result = runner.invoke(app, ["--json", "papers", "add-dir", str(folder)], env=_env(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["queued"] == 2
+    assert "[catena] step=parse" in result.stderr
+    assert "Starting Docling batch parse" in result.stderr
+    assert "step=index" in result.stderr
+    assert "step=complete" in result.stderr
+
+
 def test_add_dir_async_then_ingest_then_import_status(tmp_path, fake_ingest):
     folder = tmp_path / "papers"
     _write_pdfs(folder, ["one.pdf", "two.pdf"])
@@ -323,6 +342,28 @@ def test_add_dir_async_then_ingest_then_import_status(tmp_path, fake_ingest):
     assert final["index_status"].get("indexed") == 2
     assert final["parse_status"].get("parsed") == 2
     assert final["failed"] == []
+
+
+def test_ingest_json_keeps_stdout_parseable_and_writes_progress_to_stderr(
+    tmp_path,
+    fake_ingest,
+):
+    folder = tmp_path / "papers"
+    _write_pdfs(folder, ["one.pdf"])
+    registered = invoke_json(["papers", "add-dir", str(folder), "--async"], tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["--json", "papers", "ingest", "--table-id", str(registered["table_id"])],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["count"] == 1
+    assert "[catena] step=queued" in result.stderr
+    assert "step=complete" in result.stderr
 
 
 def test_add_dir_distinct_folders_get_distinct_tables(tmp_path, fake_ingest):
