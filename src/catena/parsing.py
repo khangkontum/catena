@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import gc
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
 PARSER_HASH = "docling-hybrid-v1"
+MIN_TEXT_LAYER_CHARS = 500
 _SUCCESS_STATUSES = {"success", "partial_success"}
 _PARSER_LOCK = RLock()
 _PARSER: DoclingParser | None = None
+_log = logging.getLogger(__name__)
+
+
+class _RapidOcrEmptyResultFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage() != "RapidOCR returned empty result!"
+
+
+logging.getLogger("docling.models.stages.ocr.rapid_ocr_model").addFilter(
+    _RapidOcrEmptyResultFilter()
+)
 
 
 @dataclass(frozen=True)
@@ -36,15 +50,20 @@ class ParsedPdfResult:
 
 
 class DoclingParser:
-    """Reusable Docling parser with preloaded PDF pipeline and shared chunker."""
+    """Docling parser configured per document to avoid unnecessary OCR."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, do_ocr: bool) -> None:
         from docling.chunking import HybridChunker
         from docling.datamodel.base_models import InputFormat
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
 
         self._lock = RLock()
-        self._converter = DocumentConverter()
+        pipeline_options = _pdf_pipeline_options(do_ocr=do_ocr)
+        self._converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+            }
+        )
         self._converter.initialize_pipeline(InputFormat.PDF)
         self._chunker = HybridChunker()
 
@@ -59,46 +78,115 @@ class DoclingParser:
     def parse_pdfs(self, paths: list[Path]) -> list[ParsedPdfResult]:
         if not paths:
             return []
-        with self._lock:
-            conversion_results = list(self._converter.convert_all(paths, raises_on_error=False))
-            parsed_results = [
-                _parse_conversion_result(path, result, self._chunker)
-                for path, result in zip(paths, conversion_results, strict=False)
-            ]
-        if len(parsed_results) < len(paths):
-            parsed_paths = {result.path for result in parsed_results}
-            parsed_results.extend(
-                ParsedPdfResult(path=path, document=None, error="Docling did not return a result")
-                for path in paths
-                if path not in parsed_paths
-            )
-        return parsed_results
+        return [_parse_pdf_result(path) for path in paths]
 
 
 def preload_docling_models() -> None:
-    """Initialize Docling's PDF pipeline once for subsequent single or batch parsing."""
+    """Initialize Docling's PDF pipeline once for subsequent single parsing."""
 
     _get_parser()
 
 
 def parse_pdf(path: Path) -> ParsedDocument:
-    """Parse a PDF with a preloaded Docling parser."""
+    """Parse a PDF, skipping OCR when its text layer is sufficient."""
 
-    return _get_parser().parse_pdf(path)
+    parsed = _parse_pdf_result(path)
+    if parsed.document is None:
+        raise RuntimeError(parsed.error or f"Docling conversion failed for {path}")
+    return parsed.document
 
 
 def parse_pdfs(paths: list[Path]) -> list[ParsedPdfResult]:
-    """Parse PDFs with Docling's batch conversion API and a shared preloaded pipeline."""
+    """Parse PDFs one by one so status, errors, and memory are isolated per paper."""
 
-    return _get_parser().parse_pdfs(paths)
+    return [_parse_pdf_result(path) for path in paths]
 
 
 def _get_parser() -> DoclingParser:
     global _PARSER  # noqa: PLW0603 - singleton cache for model reuse
     with _PARSER_LOCK:
         if _PARSER is None:
-            _PARSER = DoclingParser()
+            _PARSER = DoclingParser(do_ocr=True)
         return _PARSER
+
+
+def _parse_pdf_result(path: Path) -> ParsedPdfResult:
+    parser: DoclingParser | None = None
+    try:
+        parser = DoclingParser(do_ocr=not has_sufficient_text_layer(path))
+        return ParsedPdfResult(path=path, document=parser.parse_pdf(path))
+    except Exception as exc:
+        return ParsedPdfResult(path=path, document=None, error=str(exc))
+    finally:
+        del parser
+        gc.collect()
+
+
+def has_sufficient_text_layer(path: Path, *, min_chars: int = MIN_TEXT_LAYER_CHARS) -> bool:
+    """Return whether a PDF has enough extractable text to skip OCR."""
+
+    try:
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument(path)
+        try:
+            chars = 0
+            page_count = len(document)
+            pages_to_check = min(page_count, 5)
+            if pages_to_check == 0:
+                return False
+            for page_index in range(pages_to_check):
+                page = document[page_index]
+                text_page = page.get_textpage()
+                chars += len(text_page.get_text_range().strip())
+                text_page.close()
+                page.close()
+                if chars >= min_chars:
+                    return True
+            return chars >= max(100, min_chars // 5)
+        finally:
+            document.close()
+    except Exception as exc:
+        _log.debug("Could not inspect PDF text layer for %s: %s", path, exc)
+        return False
+
+
+def _pdf_pipeline_options(*, do_ocr: bool) -> Any:
+    from docling.datamodel.accelerator_options import AcceleratorOptions
+    from docling.datamodel.pipeline_options import (
+        OcrAutoOptions,
+        PdfPipelineOptions,
+        RapidOcrOptions,
+    )
+
+    device = _preferred_docling_device()
+    options = PdfPipelineOptions(
+        do_ocr=do_ocr,
+        accelerator_options=AcceleratorOptions(device=device),
+    )
+    if not do_ocr:
+        return options
+    if device == "mps":
+        options.ocr_options = RapidOcrOptions(
+            lang=["english"],
+            backend="torch",
+            print_verbose=False,
+            rapidocr_params={"EngineConfig.torch.use_mps": True},
+        )
+    else:
+        options.ocr_options = OcrAutoOptions(force_full_page_ocr=False)
+    return options
+
+
+def _preferred_docling_device() -> str:
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "auto"
 
 
 def _parse_conversion_result(path: Path, result: Any, chunker: Any) -> ParsedPdfResult:

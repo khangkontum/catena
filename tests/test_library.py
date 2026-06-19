@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from catena.config import Settings
 from catena.filters import PaperFilter
-from catena.library import CatenaLibrary
+from catena.library import CatenaLibrary, IngestResult
 from catena.models import (
     ExtractionCell,
     Paper,
@@ -46,7 +46,7 @@ def test_init_is_thread_safe_for_parallel_first_requests(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_add_pdfs_uses_one_batch_docling_parse(monkeypatch, tmp_path):
+async def test_add_pdfs_parses_each_paper_independently(monkeypatch, tmp_path):
     library = CatenaLibrary(Settings(data_dir=tmp_path))
     table_id = library.default_table_id()
     first = tmp_path / "first.pdf"
@@ -96,8 +96,8 @@ async def test_add_pdfs_uses_one_batch_docling_parse(monkeypatch, tmp_path):
         memberships = session.exec(select(TablePaper)).all()
 
     assert len(papers) == 2
-    assert len(parse_calls) == 1
-    assert len(parse_calls[0]) == 2
+    assert len(parse_calls) == 2
+    assert [len(call) for call in parse_calls] == [1, 1]
     assert len(chunks) == 2
     assert len(memberships) == 2
 
@@ -156,11 +156,119 @@ async def test_ingest_papers_marks_running_and_emits_progress(monkeypatch, tmp_p
     )
 
     assert [result.index_status for result in results] == [Status.INDEXED, Status.INDEXED]
-    assert running_statuses == [[Status.RUNNING, Status.RUNNING]]
+    assert running_statuses == [[Status.RUNNING, Status.QUEUED], [Status.PARSED, Status.RUNNING]]
     steps = [event.step for event in events]
-    assert steps[:3] == ["queued", "parse", "parse"]
+    assert steps[:3] == ["queued", "parse", "parsed"]
     assert "index" in steps
     assert steps[-1] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_ingest_papers_captures_parse_errors_and_continues(monkeypatch, tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    registered = library.register_pdfs([first, second])
+    parse_count = 0
+
+    def fake_parse_pdfs(paths: list[Path]) -> list[ParsedPdfResult]:
+        nonlocal parse_count
+        parse_count += 1
+        path = paths[0]
+        if parse_count == 1:
+            return [ParsedPdfResult(path=path, document=None, error="parse exploded")]
+        return [
+            ParsedPdfResult(
+                path=path,
+                document=ParsedDocument(
+                    markdown="# ok",
+                    docling_json={"name": path.name},
+                    chunks=[
+                        ParsedChunk(
+                            index=0,
+                            text="chunk",
+                            page_start=1,
+                            page_end=1,
+                            heading=None,
+                            metadata={},
+                        )
+                    ],
+                ),
+            )
+        ]
+
+    async def fake_index_paper(self: CatenaLibrary, paper_id: int) -> None:
+        with Session(self.engine) as session:
+            paper = session.get(Paper, paper_id)
+            assert paper is not None
+            paper.index_status = Status.INDEXED
+            session.add(paper)
+            session.commit()
+
+    monkeypatch.setattr("catena.library.parse_pdfs", fake_parse_pdfs)
+    monkeypatch.setattr(CatenaLibrary, "index_paper", fake_index_paper)
+
+    results = await library.ingest_papers(paper_ids=[item.paper_id for item in registered])
+
+    assert [result.parse_status for result in results] == [Status.FAILED, Status.PARSED]
+    with Session(library.engine) as session:
+        papers = session.exec(select(Paper).order_by(Paper.id)).all()
+    assert papers[0].parse_status == Status.FAILED
+    assert papers[0].parse_error == "parse exploded"
+    assert papers[1].parse_status == Status.PARSED
+    assert papers[1].index_status == Status.INDEXED
+
+
+@pytest.mark.asyncio
+async def test_ingest_papers_keeps_parsed_status_when_index_fails(monkeypatch, tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"paper")
+    registered = library.register_pdfs([pdf])
+
+    def fake_parse_pdfs(paths: list[Path]) -> list[ParsedPdfResult]:
+        path = paths[0]
+        return [
+            ParsedPdfResult(
+                path=path,
+                document=ParsedDocument(
+                    markdown="# parsed",
+                    docling_json={"name": path.name},
+                    chunks=[
+                        ParsedChunk(
+                            index=0,
+                            text="chunk",
+                            page_start=1,
+                            page_end=1,
+                            heading=None,
+                            metadata={},
+                        )
+                    ],
+                ),
+            )
+        ]
+
+    async def fake_index_paper(self: CatenaLibrary, paper_id: int) -> None:
+        raise RuntimeError("index exploded")
+
+    monkeypatch.setattr("catena.library.parse_pdfs", fake_parse_pdfs)
+    monkeypatch.setattr(CatenaLibrary, "index_paper", fake_index_paper)
+
+    results = await library.ingest_papers(paper_ids=[registered[0].paper_id])
+
+    assert results == [
+        IngestResult(registered[0].paper_id, Status.PARSED, Status.FAILED, "index exploded")
+    ]
+    with Session(library.engine) as session:
+        paper = session.get(Paper, registered[0].paper_id)
+        chunks = session.exec(select(PaperChunk)).all()
+    assert paper is not None
+    assert paper.parse_status == Status.PARSED
+    assert paper.index_status == Status.FAILED
+    assert paper.parse_error == "index exploded"
+    assert len(chunks) == 1
 
 
 def test_add_column_queues_cell_for_existing_table_paper(tmp_path):

@@ -285,9 +285,8 @@ def test_add_dir_imports_folder_into_path_bound_table(tmp_path, fake_ingest):
     assert payload["table_name"]  # derived slug
     table_id = payload["table_id"]
 
-    # one batched Docling pass for the 3 new papers
-    assert len(fake_ingest) == 1
-    assert len(fake_ingest[0]) == 3
+    assert len(fake_ingest) == 3
+    assert [len(call) for call in fake_ingest] == [1, 1, 1]
     assert [item["parse_status"] for item in payload["ingested"]] == ["parsed"] * 3
     assert [item["index_status"] for item in payload["ingested"]] == ["indexed"] * 3
 
@@ -298,7 +297,7 @@ def test_add_dir_imports_folder_into_path_bound_table(tmp_path, fake_ingest):
     assert again["queued"] == 0
     assert again["existing"] == 3
     assert again["ingested"] == []
-    assert len(fake_ingest) == 1  # no second parse
+    assert len(fake_ingest) == 3  # no second parse
 
 
 def test_add_dir_json_keeps_stdout_parseable_and_writes_progress_to_stderr(
@@ -315,7 +314,7 @@ def test_add_dir_json_keeps_stdout_parseable_and_writes_progress_to_stderr(
     assert payload["ok"] is True
     assert payload["queued"] == 2
     assert "[catena] step=parse" in result.stderr
-    assert "Starting Docling batch parse" in result.stderr
+    assert "Parsing paper" in result.stderr
     assert "step=index" in result.stderr
     assert "step=complete" in result.stderr
 
