@@ -1164,15 +1164,20 @@ def search(
         raise typer.BadParameter(
             "--mode must be one of: auto, hybrid, semantic, text, title, exact"
         )
-    results = asyncio.run(
-        _library().search(
-            query,
-            mode=mode,  # type: ignore[arg-type]
-            paper_ids=paper_id,
-            table_id=table_id,
-            top_k=top_k,
+    if not query.strip():
+        raise typer.BadParameter("Search query cannot be empty.")
+    try:
+        results = asyncio.run(
+            _library().search(
+                query,
+                mode=mode,  # type: ignore[arg-type]
+                paper_ids=paper_id,
+                table_id=table_id,
+                top_k=top_k,
+            )
         )
-    )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     if _json_output:
         _emit_items([_search_result_dict(result) for result in results], query=query, mode=mode)
         return

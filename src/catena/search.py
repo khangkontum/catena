@@ -402,15 +402,16 @@ def _fuse_ranked_lists(
     by_key: dict[tuple[str, int], _Candidate] = {}
     for source, candidates in ranked_lists.items():
         for rank, candidate in enumerate(candidates, start=1):
-            fused = by_key.get(candidate.key)
             contribution = 1.0 / (_RRF_K + rank)
+            raw_score = candidate.score
+            fused = by_key.get(candidate.key)
             if fused is None:
                 fused = candidate
                 fused.score = 0.0
                 fused.component_scores = {}
                 by_key[candidate.key] = fused
-            if candidate.score > fused.component_scores.get(source, -1.0):
-                fused.component_scores[source] = candidate.score
+            if raw_score > fused.component_scores.get(source, -1.0):
+                fused.component_scores[source] = raw_score
             fused.score += contribution
             if _kind_priority(candidate.kind) < _kind_priority(fused.kind):
                 fused.kind = candidate.kind

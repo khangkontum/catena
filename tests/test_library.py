@@ -419,3 +419,55 @@ async def test_search_supports_title_text_exact_and_table_scope(tmp_path):
         top_k=5,
     )
     assert scoped_hits == []
+
+
+@pytest.mark.asyncio
+async def test_search_hybrid_component_scores_keep_per_source_values(tmp_path):
+    library = CatenaLibrary(Settings(data_dir=tmp_path))
+    library.init()
+
+    with Session(library.engine, expire_on_commit=False) as session:
+        paper = Paper(
+            title="Graph Neural Networks for Molecules",
+            source_path="a.pdf",
+            abstract="Molecular property prediction with message passing.",
+            parse_status=Status.PARSED,
+            index_status=Status.INDEXED,
+        )
+        session.add(paper)
+        session.commit()
+        session.refresh(paper)
+        assert paper.id is not None
+        session.add(
+            PaperChunk(
+                paper_id=paper.id,
+                chunk_index=0,
+                text="The model uses message passing neural updates.",
+                page_start=3,
+                heading="Method",
+            )
+        )
+        session.commit()
+        paper_id = paper.id
+
+    library.rebuild_search_index()
+
+    hits = await library.search("neural", mode="hybrid", top_k=5)
+    assert hits, "expected at least one hybrid hit"
+    assert any(hit.paper_id == paper_id for hit in hits)
+
+    # "neural" matches both the title (paper-level key) and the chunk text
+    # (chunk-level key), so each fused hit should carry the true per-source
+    # score for every list that touched it. Previously the RRF score reset
+    # zeroed the originating source's contribution, leaving entries like
+    # {"title": 0.0, "exact": 2.0}.
+    for hit in hits:
+        assert hit.component_scores, f"hit p{hit.paper_id} has no component scores"
+        assert all(
+            value > 0.0 for value in hit.component_scores.values()
+        ), f"zeroed component score on {hit.kind}: {hit.component_scores}"
+        assert hit.score > 0.0
+
+    sources = {name for hit in hits for name in hit.component_scores}
+    assert "title" in sources
+    assert "text" in sources
