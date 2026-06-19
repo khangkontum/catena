@@ -15,7 +15,7 @@ extraction question; each cell is an evidence-backed BAML/LLM answer.
 Requires Python 3.11+. Remote: <https://github.com/khangkontum/catena>.
 
 ```bash
-mise install 'pipx:git+https://github.com/khangkontum/catena.git@main'   # mise
+mise install 'pipx:git+https://github.com/khangkontum/catena.git@master'   # mise
 uv tool install git+https://github.com/khangkontum/catena.git            # uv
 pip install git+https://github.com/khangkontum/catena.git                # pip
 ```
