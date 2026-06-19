@@ -1113,19 +1113,39 @@ def ask(
     top_k: int | None = typer.Option(
         None,
         "--top-k",
-        help="Chunks to retrieve per paper. Defaults to CATENA_TOP_K.",
+        help="Retrieval budget. Per paper for synthesis, global for fast mode.",
+    ),
+    mode: str = typer.Option(
+        "auto",
+        "--mode",
+        help="Ask mode: auto, fast, synthesis, or matrix.",
+    ),
+    max_context_chars: int | None = typer.Option(
+        None,
+        "--max-context-chars",
+        help="Maximum context characters sent to each answer prompt.",
+    ),
+    batch_size: int | None = typer.Option(
+        None,
+        "--batch-size",
+        help="Papers per map call in synthesis mode. Defaults to 1.",
     ),
 ) -> None:
     """Ask a one-off question over selected paper(s), without storing chat history."""
 
     if not paper_id and table_id is None:
         raise typer.BadParameter("Provide at least one --paper-id or a --table-id.")
+    if mode not in {"auto", "fast", "synthesis", "matrix"}:
+        raise typer.BadParameter("--mode must be one of: auto, fast, synthesis, matrix")
     answer = asyncio.run(
         _library().ask(
             question,
             paper_ids=paper_id,
             table_id=table_id,
             top_k=top_k,
+            mode=mode,  # type: ignore[arg-type]
+            max_context_chars=max_context_chars,
+            batch_size=batch_size,
         )
     )
     if _json_output:
@@ -1272,6 +1292,7 @@ def _print_papers(papers: list[Paper], *, title: str) -> None:
 def _print_one_off_answer(answer: OneOffAnswer) -> None:
     console.print("[bold]Answer[/bold]")
     console.print(answer.answer)
+    console.print(f"[dim]mode:[/dim] {answer.mode}")
     if answer.confidence:
         console.print(f"[dim]confidence:[/dim] {answer.confidence}")
     if answer.rationale:
@@ -1431,6 +1452,7 @@ def _answer_dict(answer: OneOffAnswer) -> dict[str, Any]:
     return {
         "question": answer.question,
         "paper_ids": answer.paper_ids,
+        "mode": answer.mode,
         "answer": answer.answer,
         "evidence": answer.evidence,
         "confidence": answer.confidence,

@@ -9,8 +9,16 @@ from sqlmodel import Session, select
 from catena.config import Settings
 from catena.filters import PaperFilter
 from catena.library import CatenaLibrary
-from catena.models import ExtractionCell, Paper, PaperChunk, PaperSimilarity, Status, TablePaper
+from catena.models import (
+    ExtractionCell,
+    Paper,
+    PaperChunk,
+    PaperSimilarity,
+    Status,
+    TablePaper,
+)
 from catena.parsing import ParsedChunk, ParsedDocument, ParsedPdfResult
+from catena.qa import QuestionAnswerService
 from catena.vector import LanceIndex
 
 
@@ -350,6 +358,222 @@ def test_compute_similarities_from_existing_chunk_embeddings(tmp_path):
     similar = library.similar_papers(paper_a_id)
     assert similar[0].paper.id == paper_b_id
     assert similar[0].similarity.score == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_ask_fast_mode_uses_global_table_retrieval(monkeypatch, tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        gateway_base_url="http://gateway.test",
+        gateway_api_key="key",
+        llm_model="llm",
+        embedding_model="embedding",
+    )
+    library = CatenaLibrary(settings)
+    library.init()
+    table_id = library.default_table_id()
+
+    with Session(library.engine, expire_on_commit=False) as session:
+        papers = [
+            Paper(title=f"Paper {index}", source_path=f"p{index}.pdf")
+            for index in range(2)
+        ]
+        session.add_all(papers)
+        session.commit()
+        for paper in papers:
+            session.refresh(paper)
+        chunks = [
+            PaperChunk(
+                paper_id=papers[0].id or 0,
+                chunk_index=0,
+                text="alpha metric evidence",
+                page_start=1,
+            ),
+            PaperChunk(
+                paper_id=papers[1].id or 0,
+                chunk_index=0,
+                text="beta metric evidence",
+                page_start=2,
+            ),
+        ]
+        session.add_all(chunks)
+        session.commit()
+        for chunk in chunks:
+            session.refresh(chunk)
+        paper_ids = [paper.id for paper in papers]
+
+    assert all(paper_id is not None for paper_id in paper_ids)
+    for paper_id in paper_ids:
+        library.add_paper_to_table(table_id, paper_id or 0)
+    monkeypatch.setattr("catena.qa.embed_query", _fake_embed_query)
+    LanceIndex(settings).upsert_chunks(chunks, [[1.0, 0.0], [0.0, 1.0]])
+
+    contexts: list[str] = []
+
+    async def fake_call_baml(
+        self: QuestionAnswerService,
+        question: str,
+        evidence_context: str,
+    ) -> dict[str, object]:
+        contexts.append(evidence_context)
+        return {"answer": "global", "evidence": [], "confidence": "HIGH"}
+
+    monkeypatch.setattr(QuestionAnswerService, "_call_baml", fake_call_baml)
+
+    answer = await library.ask("Which metric?", table_id=table_id, mode="fast", top_k=2)
+
+    assert answer.mode == "fast"
+    assert answer.answer == "global"
+    assert set(answer.retrieved_chunk_ids) == {chunks[0].id, chunks[1].id}
+    assert f"paper_id={paper_ids[0]}" in contexts[0]
+    assert f"paper_id={paper_ids[1]}" in contexts[0]
+
+
+@pytest.mark.asyncio
+async def test_ask_matrix_mode_uses_completed_cells(monkeypatch, tmp_path):
+    library = CatenaLibrary(
+        Settings(
+            data_dir=tmp_path,
+            gateway_base_url="http://gateway.test",
+            gateway_api_key="key",
+            llm_model="llm",
+            embedding_model="embedding",
+        )
+    )
+    library.init()
+    table_id = library.default_table_id()
+
+    with Session(library.engine, expire_on_commit=False) as session:
+        paper = Paper(title="Matrix Paper", source_path="paper.pdf")
+        session.add(paper)
+        session.commit()
+        session.refresh(paper)
+        assert paper.id is not None
+        paper_id = paper.id
+
+    library.add_paper_to_table(table_id, paper_id)
+    column = library.add_column("Sample size", "What is the sample size?", table_id=table_id)
+    with Session(library.engine, expire_on_commit=False) as session:
+        cell = session.exec(
+            select(ExtractionCell).where(
+                ExtractionCell.table_id == table_id,
+                ExtractionCell.paper_id == paper_id,
+                ExtractionCell.column_id == column.id,
+            )
+        ).one()
+        cell.status = Status.ANSWERED
+        cell.answer_text = "128 participants"
+        cell.confidence = "high"
+        cell.evidence_json = [
+            {"quote": "We enrolled 128 participants.", "page": 4, "chunk_id": "7"}
+        ]
+        session.add(cell)
+        session.commit()
+
+    contexts: list[str] = []
+
+    async def fake_call_baml(
+        self: QuestionAnswerService,
+        question: str,
+        evidence_context: str,
+    ) -> dict[str, object]:
+        contexts.append(evidence_context)
+        return {"answer": "128 participants", "evidence": [], "confidence": "HIGH"}
+
+    monkeypatch.setattr(QuestionAnswerService, "_call_baml", fake_call_baml)
+
+    answer = await library.ask(
+        "What sample size is in the table?",
+        table_id=table_id,
+        mode="matrix",
+    )
+
+    assert answer.mode == "matrix"
+    assert answer.retrieved_chunk_ids == []
+    assert answer.raw["matrix_cell_count"] == 1
+    assert "source=extraction_matrix" in contexts[0]
+    assert "column=Sample size" in contexts[0]
+    assert "answer=128 participants" in contexts[0]
+
+
+@pytest.mark.asyncio
+async def test_ask_auto_uses_synthesis_for_large_tables(monkeypatch, tmp_path):
+    library = CatenaLibrary(
+        Settings(
+            data_dir=tmp_path,
+            gateway_base_url="http://gateway.test",
+            gateway_api_key="key",
+            llm_model="llm",
+            embedding_model="embedding",
+        )
+    )
+    library.init()
+    table_id = library.default_table_id()
+    paper_count = 9
+
+    with Session(library.engine, expire_on_commit=False) as session:
+        papers = [
+            Paper(title=f"Paper {index}", source_path=f"paper-{index}.pdf")
+            for index in range(paper_count)
+        ]
+        session.add_all(papers)
+        session.commit()
+        for paper in papers:
+            session.refresh(paper)
+            assert paper.id is not None
+            session.add(
+                PaperChunk(
+                    paper_id=paper.id,
+                    chunk_index=0,
+                    text=f"Evidence from {paper.title}",
+                    page_start=1,
+                )
+            )
+        session.commit()
+        paper_ids = [paper.id for paper in papers]
+
+    for paper_id in paper_ids:
+        assert paper_id is not None
+        library.add_paper_to_table(table_id, paper_id)
+
+    monkeypatch.setattr("catena.qa.embed_query", _fake_embed_query)
+
+    map_labels: list[str] = []
+
+    async def fake_map(
+        self: QuestionAnswerService,
+        question: str,
+        context_label: str,
+        evidence_context: str,
+    ) -> dict[str, object]:
+        map_labels.append(context_label)
+        return {
+            "answer": f"{context_label} answer",
+            "evidence": [],
+            "confidence": "HIGH",
+        }
+
+    async def fake_reduce(
+        self: QuestionAnswerService,
+        question: str,
+        intermediate_answers: str,
+    ) -> dict[str, object]:
+        assert "paper 1 answer" in intermediate_answers
+        return {"answer": "synthesized", "evidence": [], "confidence": "HIGH"}
+
+    monkeypatch.setattr(QuestionAnswerService, "_call_baml_map", fake_map)
+    monkeypatch.setattr(QuestionAnswerService, "_call_baml_reduce", fake_reduce)
+
+    answer = await library.ask("What is common overall?", table_id=table_id)
+
+    assert answer.mode == "synthesis"
+    assert answer.answer == "synthesized"
+    assert len(map_labels) == paper_count
+    assert answer.raw["intermediate_count"] == paper_count
+
+
+async def _fake_embed_query(settings: Settings, query: str) -> list[float]:
+    return [1.0, 0.0]
 
 
 def test_tags_and_filter_table_creation_do_not_duplicate_papers(tmp_path):

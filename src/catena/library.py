@@ -31,7 +31,7 @@ from catena.models import (
     utcnow,
 )
 from catena.parsing import PARSER_HASH, ParsedDocument, parse_pdfs
-from catena.qa import OneOffAnswer, QuestionAnswerService
+from catena.qa import AskMode, OneOffAnswer, QuestionAnswerService
 from catena.search import SearchMode, SearchResult, SearchService, rebuild_search_index
 from catena.similarity import SimilarityService, SimilarPaper
 from catena.util import copy_pdf, safe_title_from_path, sha256_file, sha256_json, write_json
@@ -686,6 +686,9 @@ class CatenaLibrary:
         paper_ids: list[int] | None = None,
         table_id: int | None = None,
         top_k: int | None = None,
+        mode: AskMode = "auto",
+        max_context_chars: int | None = None,
+        batch_size: int | None = None,
     ) -> OneOffAnswer:
         self.init()
         service = QuestionAnswerService(self.settings)
@@ -696,6 +699,9 @@ class CatenaLibrary:
                 paper_ids=paper_ids,
                 table_id=table_id,
                 top_k=top_k,
+                mode=mode,
+                max_context_chars=max_context_chars,
+                batch_size=batch_size,
             )
 
     async def search(

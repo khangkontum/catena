@@ -10,6 +10,7 @@ from catena.config import Settings
 from catena.library import CatenaLibrary
 from catena.models import Paper, PaperChunk, Status
 from catena.parsing import ParsedChunk, ParsedDocument, ParsedPdfResult
+from catena.qa import OneOffAnswer
 
 runner = CliRunner()
 
@@ -449,3 +450,35 @@ def test_search_json_returns_local_text_hits(tmp_path):
     assert payload["count"] == 1
     assert payload["items"][0]["paper_title"] == "Fast Local Search"
     assert payload["items"][0]["page_start"] == 2
+
+
+def test_ask_json_includes_selected_mode(monkeypatch, tmp_path):
+    async def fake_ask(self: CatenaLibrary, *args, **kwargs) -> OneOffAnswer:
+        return OneOffAnswer(
+            question=args[0],
+            paper_ids=[1],
+            answer="from matrix",
+            evidence=[],
+            confidence="high",
+            rationale=None,
+            raw={"mode": kwargs["mode"]},
+            retrieved_chunk_ids=[],
+            mode=kwargs["mode"],
+        )
+
+    monkeypatch.setattr(CatenaLibrary, "ask", fake_ask)
+
+    payload = invoke_json(["ask", "Question?", "--table-id", "1", "--mode", "matrix"], tmp_path)
+
+    assert payload["item"]["mode"] == "matrix"
+    assert payload["item"]["answer"] == "from matrix"
+
+
+def test_ask_rejects_invalid_mode(tmp_path):
+    result = runner.invoke(
+        app,
+        ["--json", "ask", "Question?", "--table-id", "1", "--mode", "nope"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code != 0

@@ -92,6 +92,13 @@ class BamlSyncClient:
             "question": question,"evidence_context": evidence_context,
         })
         return typing.cast(types.PaperQuestionAnswer, result.cast_to(types, types, stream_types, False, __runtime__))
+    def AnswerQuestionFromContext(self, question: str,context_label: str,evidence_context: str,
+        baml_options: BamlCallOptions = {},
+    ) -> types.PaperQuestionAnswer:
+        result = self.__options.merge_options(baml_options).call_function_sync(function_name="AnswerQuestionFromContext", args={
+            "question": question,"context_label": context_label,"evidence_context": evidence_context,
+        })
+        return typing.cast(types.PaperQuestionAnswer, result.cast_to(types, types, stream_types, False, __runtime__))
     def ExtractCell(self, paper_title: str,column_name: str,column_prompt: str,evidence_context: str,
         baml_options: BamlCallOptions = {},
     ) -> types.CellExtraction:
@@ -99,6 +106,13 @@ class BamlSyncClient:
             "paper_title": paper_title,"column_name": column_name,"column_prompt": column_prompt,"evidence_context": evidence_context,
         })
         return typing.cast(types.CellExtraction, result.cast_to(types, types, stream_types, False, __runtime__))
+    def SynthesizeQuestionAnswers(self, question: str,intermediate_answers: str,
+        baml_options: BamlCallOptions = {},
+    ) -> types.PaperQuestionAnswer:
+        result = self.__options.merge_options(baml_options).call_function_sync(function_name="SynthesizeQuestionAnswers", args={
+            "question": question,"intermediate_answers": intermediate_answers,
+        })
+        return typing.cast(types.PaperQuestionAnswer, result.cast_to(types, types, stream_types, False, __runtime__))
     
 
 
@@ -120,6 +134,18 @@ class BamlStreamClient:
           lambda x: typing.cast(types.PaperQuestionAnswer, x.cast_to(types, types, stream_types, False, __runtime__)),
           ctx,
         )
+    def AnswerQuestionFromContext(self, question: str,context_label: str,evidence_context: str,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.BamlSyncStream[stream_types.PaperQuestionAnswer, types.PaperQuestionAnswer]:
+        ctx, result = self.__options.merge_options(baml_options).create_sync_stream(function_name="AnswerQuestionFromContext", args={
+            "question": question,"context_label": context_label,"evidence_context": evidence_context,
+        })
+        return baml_py.BamlSyncStream[stream_types.PaperQuestionAnswer, types.PaperQuestionAnswer](
+          result,
+          lambda x: typing.cast(stream_types.PaperQuestionAnswer, x.cast_to(types, types, stream_types, True, __runtime__)),
+          lambda x: typing.cast(types.PaperQuestionAnswer, x.cast_to(types, types, stream_types, False, __runtime__)),
+          ctx,
+        )
     def ExtractCell(self, paper_title: str,column_name: str,column_prompt: str,evidence_context: str,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.BamlSyncStream[stream_types.CellExtraction, types.CellExtraction]:
@@ -130,6 +156,18 @@ class BamlStreamClient:
           result,
           lambda x: typing.cast(stream_types.CellExtraction, x.cast_to(types, types, stream_types, True, __runtime__)),
           lambda x: typing.cast(types.CellExtraction, x.cast_to(types, types, stream_types, False, __runtime__)),
+          ctx,
+        )
+    def SynthesizeQuestionAnswers(self, question: str,intermediate_answers: str,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.BamlSyncStream[stream_types.PaperQuestionAnswer, types.PaperQuestionAnswer]:
+        ctx, result = self.__options.merge_options(baml_options).create_sync_stream(function_name="SynthesizeQuestionAnswers", args={
+            "question": question,"intermediate_answers": intermediate_answers,
+        })
+        return baml_py.BamlSyncStream[stream_types.PaperQuestionAnswer, types.PaperQuestionAnswer](
+          result,
+          lambda x: typing.cast(stream_types.PaperQuestionAnswer, x.cast_to(types, types, stream_types, True, __runtime__)),
+          lambda x: typing.cast(types.PaperQuestionAnswer, x.cast_to(types, types, stream_types, False, __runtime__)),
           ctx,
         )
     
@@ -147,11 +185,25 @@ class BamlHttpRequestClient:
             "question": question,"evidence_context": evidence_context,
         }, mode="request")
         return result
+    def AnswerQuestionFromContext(self, question: str,context_label: str,evidence_context: str,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.baml_py.HTTPRequest:
+        result = self.__options.merge_options(baml_options).create_http_request_sync(function_name="AnswerQuestionFromContext", args={
+            "question": question,"context_label": context_label,"evidence_context": evidence_context,
+        }, mode="request")
+        return result
     def ExtractCell(self, paper_title: str,column_name: str,column_prompt: str,evidence_context: str,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.baml_py.HTTPRequest:
         result = self.__options.merge_options(baml_options).create_http_request_sync(function_name="ExtractCell", args={
             "paper_title": paper_title,"column_name": column_name,"column_prompt": column_prompt,"evidence_context": evidence_context,
+        }, mode="request")
+        return result
+    def SynthesizeQuestionAnswers(self, question: str,intermediate_answers: str,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.baml_py.HTTPRequest:
+        result = self.__options.merge_options(baml_options).create_http_request_sync(function_name="SynthesizeQuestionAnswers", args={
+            "question": question,"intermediate_answers": intermediate_answers,
         }, mode="request")
         return result
     
@@ -169,11 +221,25 @@ class BamlHttpStreamRequestClient:
             "question": question,"evidence_context": evidence_context,
         }, mode="stream")
         return result
+    def AnswerQuestionFromContext(self, question: str,context_label: str,evidence_context: str,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.baml_py.HTTPRequest:
+        result = self.__options.merge_options(baml_options).create_http_request_sync(function_name="AnswerQuestionFromContext", args={
+            "question": question,"context_label": context_label,"evidence_context": evidence_context,
+        }, mode="stream")
+        return result
     def ExtractCell(self, paper_title: str,column_name: str,column_prompt: str,evidence_context: str,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.baml_py.HTTPRequest:
         result = self.__options.merge_options(baml_options).create_http_request_sync(function_name="ExtractCell", args={
             "paper_title": paper_title,"column_name": column_name,"column_prompt": column_prompt,"evidence_context": evidence_context,
+        }, mode="stream")
+        return result
+    def SynthesizeQuestionAnswers(self, question: str,intermediate_answers: str,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.baml_py.HTTPRequest:
+        result = self.__options.merge_options(baml_options).create_http_request_sync(function_name="SynthesizeQuestionAnswers", args={
+            "question": question,"intermediate_answers": intermediate_answers,
         }, mode="stream")
         return result
     

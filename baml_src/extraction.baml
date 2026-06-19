@@ -106,3 +106,66 @@ function AnswerQuestion(
     {{ ctx.output_format }}
   "#
 }
+
+function AnswerQuestionFromContext(
+  question: string,
+  context_label: string,
+  evidence_context: string
+) -> PaperQuestionAnswer {
+  client Gateway
+  prompt #"
+    You answer one standalone question over a bounded subset of research-paper evidence.
+
+    User question:
+    {{ question }}
+
+    Context label:
+    {{ context_label }}
+
+    Evidence context:
+    ---
+    {{ evidence_context }}
+    ---
+
+    Rules:
+    - Use only the evidence context in this exact message.
+    - Do not use outside knowledge.
+    - Answer for this context only, not for papers outside this context.
+    - Include direct quotes for every substantive claim.
+    - Use at most 4 evidence quotes total.
+    - Each evidence quote must carry the paper_id, paper_title if available, page if available, and chunk_id from the context metadata.
+    - If the evidence context does not support an answer, set answer to exactly "Not enough evidence.", confidence to HIGH, and evidence to [].
+
+    {{ ctx.output_format }}
+  "#
+}
+
+function SynthesizeQuestionAnswers(
+  question: string,
+  intermediate_answers: string
+) -> PaperQuestionAnswer {
+  client Gateway
+  prompt #"
+    You synthesize intermediate answers from multiple research-paper contexts.
+
+    User question:
+    {{ question }}
+
+    Intermediate answers with evidence:
+    ---
+    {{ intermediate_answers }}
+    ---
+
+    Rules:
+    - Use only the intermediate answers and evidence in this exact message.
+    - Do not use outside knowledge.
+    - Synthesize across papers when the question asks for counts, comparisons, common trends, or whole-table summaries.
+    - Preserve uncertainty and missing evidence instead of overclaiming.
+    - Include direct quotes for the most important substantive claims.
+    - Use at most 6 evidence quotes total.
+    - Each evidence quote must carry paper_id, paper_title if available, page if available, and chunk_id from the intermediate evidence.
+    - If the intermediate answers do not support an answer, set answer to exactly "Not enough evidence.", confidence to HIGH, and evidence to [].
+
+    {{ ctx.output_format }}
+  "#
+}

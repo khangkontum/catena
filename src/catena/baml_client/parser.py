@@ -28,11 +28,23 @@ class LlmResponseParser:
         result = self.__options.merge_options(baml_options).parse_response(function_name="AnswerQuestion", llm_response=llm_response, mode="request")
         return typing.cast(types.PaperQuestionAnswer, result)
 
+    def AnswerQuestionFromContext(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> types.PaperQuestionAnswer:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="AnswerQuestionFromContext", llm_response=llm_response, mode="request")
+        return typing.cast(types.PaperQuestionAnswer, result)
+
     def ExtractCell(
         self, llm_response: str, baml_options: BamlCallOptions = {},
     ) -> types.CellExtraction:
         result = self.__options.merge_options(baml_options).parse_response(function_name="ExtractCell", llm_response=llm_response, mode="request")
         return typing.cast(types.CellExtraction, result)
+
+    def SynthesizeQuestionAnswers(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> types.PaperQuestionAnswer:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="SynthesizeQuestionAnswers", llm_response=llm_response, mode="request")
+        return typing.cast(types.PaperQuestionAnswer, result)
 
     
 
@@ -48,10 +60,22 @@ class LlmStreamParser:
         result = self.__options.merge_options(baml_options).parse_response(function_name="AnswerQuestion", llm_response=llm_response, mode="stream")
         return typing.cast(stream_types.PaperQuestionAnswer, result)
 
+    def AnswerQuestionFromContext(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> stream_types.PaperQuestionAnswer:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="AnswerQuestionFromContext", llm_response=llm_response, mode="stream")
+        return typing.cast(stream_types.PaperQuestionAnswer, result)
+
     def ExtractCell(
         self, llm_response: str, baml_options: BamlCallOptions = {},
     ) -> stream_types.CellExtraction:
         result = self.__options.merge_options(baml_options).parse_response(function_name="ExtractCell", llm_response=llm_response, mode="stream")
         return typing.cast(stream_types.CellExtraction, result)
+
+    def SynthesizeQuestionAnswers(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> stream_types.PaperQuestionAnswer:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="SynthesizeQuestionAnswers", llm_response=llm_response, mode="stream")
+        return typing.cast(stream_types.PaperQuestionAnswer, result)
 
     
