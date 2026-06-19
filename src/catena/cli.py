@@ -111,19 +111,6 @@ def config() -> None:
     console.print(table)
 
 
-@app.command()
-def serve(
-    host: str = typer.Option("127.0.0.1", "--host", help="Bind host."),
-    port: int = typer.Option(8765, "--port", help="Bind port."),
-    reload: bool = typer.Option(False, "--reload", help="Reload on source changes."),
-) -> None:
-    """Run the local FastAPI server for the web frontend."""
-
-    import uvicorn
-
-    uvicorn.run("catena.api:create_app", host=host, port=port, reload=reload, factory=True)
-
-
 @db_app.command("upgrade")
 def db_upgrade(revision: str = typer.Argument("head", help="Alembic revision.")) -> None:
     """Run Alembic migrations."""

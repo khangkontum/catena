@@ -14,16 +14,13 @@ dependencies = [
     "alembic>=1.17.0",
     "baml-py>=0.203.1,<0.204",
     "docling>=2.64.0",
-    "fastapi>=0.124.0",
     "httpx>=0.28.0",
     "lancedb>=0.25.0",
     "openai>=2.8.0",
     "pydantic>=2.12.0",
-    "python-multipart>=0.0.20",
     "rich>=14.2.0",
     "sqlmodel>=0.0.27",
     "typer>=0.20.0",
-    "uvicorn[standard]>=0.38.0",
 ]
 
 [dependency-groups]

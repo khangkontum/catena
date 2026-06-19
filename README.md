@@ -2,7 +2,7 @@
 
 `catena` is a local-first Python package for building Elicit-style evidence tables over PDFs.
 
-The first frontend is a CLI, with a local Next.js web frontend in `apps/web/`. The app model is:
+The interface is a CLI. The app model is:
 
 - papers are stored once in a global library;
 - extraction tables select any subset of global papers;
@@ -12,18 +12,13 @@ The first frontend is a CLI, with a local Next.js web frontend in `apps/web/`. T
 ## Stack
 
 - `uv` for Python builds/environments.
-- `bun` for the Next.js frontend.
-- `mise` owns the project `uv` and `bun` versions.
+- `mise` owns the project `uv` version.
 - SQLite/SQLModel for source-of-truth data.
 - Alembic for formal schema migrations.
 - Docling for local PDF parsing/chunking.
 - LanceDB for local vector retrieval.
 - OpenAI-compatible gateway for all LLM and embedding calls.
 - BAML for structured extraction outputs.
-- FastAPI/Uvicorn for the local API server.
-- Next.js/TypeScript/Tailwind/shadcn-style components for the web UI.
-- AG Grid for the dynamic extraction matrix.
-- TanStack Query for frontend API state.
 
 No local-model backend is configured or supported by default.
 
@@ -60,36 +55,6 @@ mise exec -- uv run catena db history
 mise exec -- uv run alembic -c alembic.ini upgrade head
 mise exec -- uv run alembic -c alembic.ini revision --autogenerate -m "describe change"
 ```
-
-## Local web app
-
-Run both sides through `mise` so the pinned `uv` and `bun` versions are used:
-
-```bash
-mise run api:dev
-mise run web:dev
-```
-
-Then open <http://127.0.0.1:3000>. The web frontend calls the local API at
-`NEXT_PUBLIC_CATENA_API_URL`, defaulting to `http://127.0.0.1:8765`.
-
-Useful frontend tasks:
-
-```bash
-mise run web:install
-mise run web:lint
-mise run web:typecheck
-mise run web:build
-mise run check
-```
-
-The frontend currently includes routes for:
-
-- `/tables` and `/tables/[tableId]` — table management and the AG Grid extraction matrix.
-- `/papers` — global paper upload/listing, tags, enrichment.
-- `/tags` — tag creation/listing.
-- `/ask` — stateless one-off Q&A.
-- `/similarity` — local paper-pair similarity scoring.
 
 ## Common CLI flow
 
