@@ -1,18 +1,13 @@
 # catena
 
-A local-first CLI for building Elicit-style evidence tables over PDFs. Papers are stored
-once in a global library; extraction tables select subsets; each column is one atomic
-extraction question; each cell is an evidence-backed BAML/LLM answer.
+A small CLI for building RAG db over PDFs. Built to bridge the exploration burden for agents while keep human readable output. Papers are stored in a table manner; each column is one extraction question; each cell is a cited LLM answer.
 
 ## Stack
-
-`uv` · SQLite/SQLModel (source of truth) · Alembic (migrations) · Docling (PDF parsing)
-· LanceDB (vector retrieval) · OpenAI-compatible gateway (LLM + embeddings) · BAML
-(structured extraction).
+Docling (PDF parsing) + LanceDB (vector retrieval)
 
 ## Installation
 
-Requires Python 3.11+. Remote: <https://github.com/khangkontum/catena>.
+Requires Python 3.11+.
 
 ```bash
 mise install 'pipx:git+https://github.com/khangkontum/catena.git@master'   # mise
@@ -34,10 +29,6 @@ catena skill install --name lit-review
 ```
 
 ## Setup
-
-Settings resolve in this order (highest first): environment variables (`LLM_*`,
-`CATENA_*`) → a discovered TOML config file → defaults. `catena config` shows which
-file is loaded and the full search order.
 
 ### Config file
 
@@ -61,27 +52,12 @@ embedding_model = "text-embedding-3-small"
 top_k = 12
 ```
 
-Keys: `data_dir`, `gateway_base_url`, `gateway_api_key`, `llm_model`,
-`embedding_model`, `embedding_batch_size`, `top_k`, `llm_temperature`. Omitted fields
-fall back to env vars then defaults — keep secrets in `mise.local.toml [env]`.
-
 Write a starter config to the default location (`~/.config/catena/config.toml`):
 
 ```bash
 catena config init                # errors if it already exists
 catena config init --force        # overwrite
 catena config init --path FILE    # write elsewhere
-```
-
-### Environment variables
-
-```toml
-# mise.local.toml (per-project, untracked)
-[env]
-LLM_GATEWAY_BASE_URL = "https://your-gateway.example/v1"
-LLM_GATEWAY_API_KEY = "..."
-LLM_MODEL = "..."
-LLM_EMBEDDING_MODEL = "..."
 ```
 
 One-time init creates `.catena/` storage and runs migrations to head:
